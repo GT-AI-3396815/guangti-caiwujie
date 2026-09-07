@@ -1,0 +1,9 @@
+# 运行时数据（含用户密码哈希与账本，禁止入库）
+data/
+*.log
+
+# 系统与编辑器
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/

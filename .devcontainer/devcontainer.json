@@ -1,0 +1,12 @@
+{
+  "name": "光体•财无界",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:20",
+  "forwardPorts": [8642],
+  "portsAttributes": {
+    "8642": { "label": "平台服务", "onAutoForward": "openBrowser", "visibility": "public" }
+  },
+  "postCreateCommand": "node --check server.js && echo '✓ 环境就绪，运行 node server.js 启动平台'",
+  "customizations": {
+    "vscode": { "extensions": ["ms-vscode.js-debug"] }
+  }
+}
