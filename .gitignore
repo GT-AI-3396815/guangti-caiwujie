@@ -7,3 +7,8 @@ Thumbs.db
 .DS_Store
 .vscode/
 .idea/
+
+# 转换生成的临时产物
+scripts/autostart-task.xml
+scripts/*.body
+scripts/*.final
