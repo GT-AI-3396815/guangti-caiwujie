@@ -125,6 +125,8 @@ guangti-qianwujie/
 ├── server-hidden.vbs    # 开机自启静默拉起器（路径无关）
 ├── Dockerfile           # 容器化部署（/app/data 持久卷）
 ├── .github/workflows/   # CI：推送自动跑集成测试
+├── render.yaml          # Render.com 部署蓝图（永久公网 URL）
+├── scripts/             # 自启安装脚本与任务定义
 ├── .devcontainer/       # GitHub Codespaces 一键云端运行
 ├── data/db.json         # 服务端数据库（自动生成，不入库）
 ├── index.html           # 页面骨架 + SVG 图标库

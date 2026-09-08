@@ -1,14 +1,12 @@
 @echo off
-chcp 65001 >nul
-title 光体•财无界 服务守护
+rem GuangTi CaiWuJie service guard: auto-restart on crash. ASCII only (headless cmd parses ANSI).
 cd /d "%~dp0"
-echo ========================================
-echo   光体•财无界 服务守护已启动
-echo   访问地址: http://localhost:8642
-echo   服务崩溃将自动重启，关闭此窗口即停止
-echo ========================================
+set "NODE_EXE=C:\Program Files\nodejs\node.exe"
+if not exist "%NODE_EXE%" set "NODE_EXE=node"
+echo [%date% %time%] guard started (node=%NODE_EXE%) >> server-guard.log
 :loop
-node server.js
-echo [守护] 服务退出(代码 %errorlevel%)，2 秒后自动重启...
+echo [%date% %time%] starting node... >> server-guard.log
+"%NODE_EXE%" server.js >> server-guard.log 2>&1
+echo [%date% %time%] node exited (%errorlevel%), restart in 2s >> server-guard.log
 timeout /t 2 /nobreak >nul
 goto loop

@@ -1,0 +1,9 @@
+# Render.com 部署蓝图 — 推送本仓库后在 render.com 选择 "Blueprint" 即可
+# 免费档说明：15 分钟无访问会休眠（首次唤醒约 50 秒），URL 永久有效
+services:
+  - type: web
+    name: guangti-caiwujie
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/rank
+    autoDeploy: true
