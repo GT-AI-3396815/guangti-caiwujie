@@ -19,7 +19,11 @@
     authTab: 'login',
     interactTimer: null,
     drawerTaskId: null,
-    notifiedOrders: {}
+    notifiedOrders: {},
+    reviewOrderId: null,
+    campaignOrderId: null,
+    adminKey: sessionStorage.getItem('gt_admin_key') || '',
+    profileId: null
   };
 
   // 客户端数据缓存（每次导航从服务端刷新）
@@ -32,6 +36,12 @@
     dash: null,
     wallet: null,
     rank: null,
+    unread: 0,
+    messages: [],
+    profile: null,
+    reviewOrders: [],
+    reviewTask: null,
+    admin: null,
     interact: { defs: [], done: {}, cooldown: {} },
     checkin: null
   };
@@ -101,6 +111,8 @@
   }
   function handleErr(e) {
     if (e && e.status === 401) { toast('请先登录后再操作', 'warn'); openAuth('login'); return; }
+    if (e && e.code === 'need_biz') { toast(e.message, 'warn'); location.hash = '#/kyc'; return; }
+    if (e && e.code === 'need_kyc') { toast(e.message, 'warn'); location.hash = '#/kyc'; return; }
     var msg = (e && e.message) || '操作失败，请重试';
     if (e && e.message && e.message.indexOf('Failed to fetch') >= 0) msg = '网络连接失败，请确认服务已启动';
     toast(msg, 'err');
@@ -149,6 +161,31 @@
       case 'rank':
         jobs.push(Api.rank().then(function (r) { C.rank = r; }));
         break;
+      case 'messages':
+        jobs.push(Api.messages().then(function (r) {
+          C.messages = r.messages;
+          C.unread = r.unread;
+        }));
+        break;
+      case 'kyc':
+        jobs.push(Api.me().then(function (r) { C.me = r.user; }));
+        break;
+      case 'profile':
+        jobs.push(Api.userProfile(S.profileId).then(function (r) { C.profile = r; }).catch(function (e) { C.profile = null; }));
+        break;
+      case 'admin':
+        if (S.adminKey) {
+          jobs.push(Api.admin.overview(S.adminKey).then(function (r) { C.admin = r; }).catch(function (e) { C.admin = null; }));
+          jobs.push(Api.admin.withdrawals(S.adminKey).then(function (r) { C.adminWithdrawals = r.withdrawals; }).catch(function (e) { C.adminWithdrawals = []; }));
+          jobs.push(Api.admin.reports(S.adminKey).then(function (r) { C.adminReports = r.reports; }).catch(function (e) { C.adminReports = []; }));
+        }
+        break;
+      case 'wallet':
+        jobs.push(Api.wallet().then(function (r) {
+          C.wallet = r;
+          if (C.me) C.me.balance = r.balance;
+        }));
+        break;
       case 'dash':
         jobs.push(Api.dashboard().then(function (r) { C.dash = r; }));
         jobs.push(Api.campaigns().then(function (r) { C.campaigns = r.campaigns; }));
@@ -184,12 +221,15 @@
       { r: 'help',      n: '帮助中心', i: 'i-book' }
     ]
   };
-  var ROUTES = ['market', 'my', 'publish', 'interact', 'checkin', 'wallet', 'rank', 'help', 'dash', 'create', 'campaigns'];
+  var ROUTES = ['market', 'my', 'publish', 'interact', 'checkin', 'wallet', 'rank', 'help', 'dash', 'create', 'campaigns', 'messages', 'kyc', 'admin', 'agreement', 'privacy', 'profile'];
   var MERCHANT_ROUTES = ['dash', 'create', 'campaigns'];
+  var COMMON_ROUTES = ['messages', 'kyc', 'admin', 'agreement', 'privacy', 'profile', 'help'];
 
   function parseHash() {
     var h = location.hash.replace(/^#\/?/, '');
-    var r = h.split('?')[0] || '';
+    var parts = h.split('?')[0].split('/');
+    var r = parts[0] || '';
+    if (r === 'creator' && parts[1]) { S.profileId = parts[1]; return 'profile'; }
     return ROUTES.indexOf(r) >= 0 ? r : null;
   }
   function defaultRoute() {
@@ -199,7 +239,10 @@
   async function nav() {
     var r = parseHash();
     if (!r) { location.hash = defaultRoute(); return; }
-    S.role = MERCHANT_ROUTES.indexOf(r) >= 0 ? 'merchant' : 'creator';
+    // 通用路由（消息/认证/帮助/协议/主页/admin）不切换角色
+    if (COMMON_ROUTES.indexOf(r) < 0) {
+      S.role = MERCHANT_ROUTES.indexOf(r) >= 0 ? 'merchant' : 'creator';
+    }
     S.route = r;
     if (!S.booted) renderLoading();
     try {
@@ -234,7 +277,11 @@
   function renderUser() {
     var z = $('#userZone');
     if (C.me) {
-      z.innerHTML = '<div class="user-pill" data-action="user-menu">' +
+      var bell = '<button class="icon-btn bell-btn" data-action="nav" data-route="messages" title="站内消息">' +
+        icon('i-bell') + (C.unread > 0 ? '<span class="bell-badge">' + (C.unread > 9 ? '9+' : C.unread) + '</span>' : '') +
+        '</button>';
+      z.innerHTML = bell +
+        '<div class="user-pill" data-action="user-menu" title="' + esc(C.me.name) + '">' +
         '<span class="avatar">' + esc(C.me.name.slice(0, 1)) + '</span>' +
         '<span class="user-pill-body"><b>' + esc(C.me.name) + '</b>' +
         '<i>¥' + money(C.me.balance) + '</i></span></div>';
@@ -259,7 +306,7 @@
     return '<article class="task-card">' +
       '<div class="task-cover" style="background:' + GT.COVERS[(t.cover || 0) % GT.COVERS.length] + '">' +
         '<div class="task-tags">' + (t.pinned ? tagBadge('置顶') : '') + (t.tags || []).filter(function (x) { return x !== '置顶'; }).map(tagBadge).join('') + '</div>' +
-        '<span class="badge" style="background:rgba(0,0,0,.35);color:#fff;backdrop-filter:blur(4px)">' + icon('i-robot', 'ic-sm') + 'AI 推荐 ' + t.aiScore + '</span>' +
+        '<span class="badge" style="background:rgba(0,0,0,.35);color:#fff;backdrop-filter:blur(4px)" title="规则模型：奖励力度+名额余量+紧急度+商家认证">' + icon('i-robot', 'ic-sm') + '匹配分 ' + t.aiScore + '</span>' +
       '</div>' +
       '<div class="task-body">' +
         '<h3 class="task-title" data-action="open-task" data-id="' + t.id + '">' + esc(t.title) + '</h3>' +
@@ -374,7 +421,12 @@
         '<span>' + platBadge(t.platform, true) + esc((GT.PLATFORMS[t.platform] || {}).name || '') + '</span>' +
         '<span>' + icon('i-clock') + '截止剩余 ' + t.daysLeft + ' 天</span>' +
         '<span>' + icon('i-users') + '粉丝 ≥ ' + t.fanMin + '</span>' +
-        '<span>' + icon('i-robot') + 'AI 推荐 ' + t.aiScore + ' 分</span>' +
+        '<span>' + icon('i-robot') + '匹配分 ' + t.aiScore + '</span>' +
+      '</div>' +
+      '<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">' +
+        '<span class="badge ' + (t.reviewMode === 'auto' ? 'b-cyan' : 'b-blue') + '">' +
+        (t.reviewMode === 'auto' ? '平台自动验收 · 提交后秒结' : '商家人工验收 · 72h 超时自动通过') + '</span>' +
+        '<span class="badge b-gold">结算收 10% 服务费</span>' +
       '</div>' +
 
       '<div style="margin-top:16px;padding:16px;border-radius:14px;background:var(--brand-grad-soft);border:1px solid var(--line)">' +
@@ -395,6 +447,10 @@
         '<div><div style="font-weight:700;font-size:14px">' + esc(t.merchant) + '</div>' +
         '<div style="font-size:12px;color:var(--muted)">' + icon('i-shield', 'ic-sm') + ' 预算已托管 · 平台担保结算</div></div></div></div>' +
 
+      '<div style="margin-top:20px;text-align:right">' +
+        '<a href="javascript:void 0" data-action="report-task" data-id="' + t.id + '" style="font-size:12.5px;color:var(--muted)">' + icon('i-shield', 'ic-sm') + ' 举报该任务</a>' +
+      '</div>' +
+
       '<div style="margin-top:26px;display:flex;gap:10px">' +
         (full
           ? '<button class="btn btn-ghost btn-block" disabled>本期已抢光，等待下期</button>'
@@ -411,14 +467,21 @@
   /* ================================================================
      视图：我的任务
      ================================================================ */
-  var ST_NAMES = { todo: ['待发布', 'st-todo'], review: ['审核中', 'st-review'], settled: ['已结算', 'st-settled'] };
+  var ST_NAMES = {
+    todo: ['待发布', 'st-todo'],
+    review: ['待验收', 'st-review'],
+    rejected: ['已拒稿', 'st-todo'],
+    settled: ['已结算', 'st-settled'],
+    cancelled: ['已取消', 'st-off']
+  };
 
   function viewMy() {
     if (!C.orders.length) {
-      return '<div class="page-head"><h1>' + icon('i-check') + '我的任务</h1><div class="sub">接受的任务会出现在这里，跟进发布与结算进度。</div></div>' +
+      return '<div class="page-head"><h1>' + icon('i-check') + '我的任务</h1><div class="sub">接受的任务会出现在这里，跟进发布与验收进度。</div></div>' +
         '<div class="card empty">' + icon('i-bolt') + '<p>还没有接受任务，去任务广场接一单吧！</p>' +
         '<div style="margin-top:16px"><button class="btn btn-primary" data-action="nav" data-route="market">前往任务广场</button></div></div>';
     }
+    var feeNote = '平台服务费 ' + Math.round(10) + '% 将在结算时收取';
     var rows = C.orders.map(function (o) {
       var st = ST_NAMES[o.status] || ST_NAMES.todo;
       var act = '';
@@ -426,19 +489,27 @@
         act = '<button class="btn btn-primary btn-sm" data-action="submit-link" data-id="' + o.id + '">' + icon('i-link') + '提交作品链接</button>' +
               '<button class="btn btn-ghost btn-sm" data-action="quick-publish" data-task="' + o.taskId + '">去创作</button>';
       } else if (o.status === 'review') {
-        act = '<span class="dot-status st-review">平台审核中</span>';
+        act = o.reviewMode === 'manual'
+          ? '<span class="dot-status st-review">商家验收中 · 超 72h 自动通过</span>'
+          : '<span class="dot-status st-review">平台自动验收中</span>';
+      } else if (o.status === 'rejected') {
+        act = '<button class="btn btn-primary btn-sm" data-action="resubmit-link" data-id="' + o.id + '">' + icon('i-refresh') + '修改后重提</button>' +
+              '<span class="reject-reason" title="' + esc(o.rejectReason || '') + '">理由：' + esc((o.rejectReason || '').slice(0, 18)) + '…</span>';
+      } else if (o.status === 'cancelled') {
+        act = '<span class="dot-status st-off">已释放名额</span>';
       } else {
-        act = '<span class="dot-status st-settled">已结算 ¥' + money(o.paid) + '</span>';
+        act = '<span class="dot-status st-settled">已结算 实收¥' + money(o.income !== undefined ? o.income : o.paid) + '</span>';
       }
+      var amount = o.status === 'settled' ? (o.income !== undefined ? o.income : o.paid) : (o.reward || 0);
       return '<tr><td class="strong">' + esc(o.title || '') + '</td>' +
         '<td>' + platBadge(o.platform, true) + ' ' + esc((GT.PLATFORMS[o.platform] || {}).name || '') + '</td>' +
         '<td>' + modeBadge(o.mode) + '</td>' +
-        '<td class="num">¥' + money(o.status === 'settled' ? o.paid : (o.reward || 0)) + '</td>' +
+        '<td class="num">¥' + money(amount) + '</td>' +
         '<td><span class="dot-status ' + st[1] + '">' + st[0] + '</span></td>' +
         '<td style="color:var(--muted)">' + timeAgo(o.acceptedAt) + '</td>' +
         '<td>' + act + '</td></tr>';
     }).join('');
-    return '<div class="page-head"><h1>' + icon('i-check') + '我的任务</h1><div class="sub">共 ' + C.orders.length + ' 个任务 · 提交链接后平台自动审核并结算（服务端实时处理）</div></div>' +
+    return '<div class="page-head"><h1>' + icon('i-check') + '我的任务</h1><div class="sub">共 ' + C.orders.length + ' 个任务 · ' + feeNote + '</div></div>' +
       '<div class="card" style="padding:0"><div class="table-wrap" style="border:none"><table class="data">' +
       '<thead><tr><th>任务</th><th>平台</th><th>模式</th><th>收益</th><th>状态</th><th>接单时间</th><th>操作</th></tr></thead>' +
       '<tbody>' + rows + '</tbody></table></div></div>';
@@ -511,10 +582,11 @@
         : '';
       return '<tr><td class="strong">' + thumb + esc(c.title) + '</td><td>' + plats + '</td>' +
         '<td class="num">' + c.stats.views + '</td><td>' + c.stats.likes + '</td><td>' + c.stats.comments + '</td>' +
-        '<td style="color:var(--muted)">' + timeAgo(c.createdAt) + '</td></tr>';
+        '<td style="color:var(--muted)">' + timeAgo(c.createdAt) + '</td>' +
+        '<td><button class="btn btn-danger btn-sm" data-action="content-del" data-id="' + c.id + '">删除</button></td></tr>';
     }).join('');
     return '<div class="card" style="padding:0"><div class="table-wrap" style="border:none"><table class="data">' +
-      '<thead><tr><th>标题</th><th>平台状态</th><th>播放</th><th>点赞</th><th>评论</th><th>发布时间</th></tr></thead>' +
+      '<thead><tr><th>标题</th><th>平台状态</th><th>播放</th><th>点赞</th><th>评论</th><th>发布时间</th><th>操作</th></tr></thead>' +
       '<tbody>' + rows + '</tbody></table></div></div>';
   }
 
@@ -665,16 +737,28 @@
   }
 
   function viewWallet() {
-    var w = C.wallet || { balance: 0, totalEarn: 0, totalWithdraw: 0, today: 0, tx: [] };
+    var w = C.wallet || { balance: 0, totalEarn: 0, totalWithdraw: 0, today: 0, tx: [], withdrawals: [] };
     var lv = levelOf(w.totalEarn);
+    var kycOk = C.me && C.me.kyc && C.me.kyc.status === 'verified';
+    var kycBanner = kycOk
+      ? '<div class="card" style="margin-top:16px;padding:12px 16px;display:flex;gap:10px;align-items:center">' +
+        icon('i-shield') + '<span style="font-size:13px;color:var(--text2)">实名已认证（' + esc((C.me.kyc.realName || '').slice(0, 1)) + '**）· 提现已解锁</span></div>'
+      : '<div class="card" style="margin-top:16px;padding:12px 16px;display:flex;gap:10px;align-items:center;border-color:rgba(255,107,129,.4)">' +
+        icon('i-shield') + '<span style="font-size:13px;color:var(--text2);flex:1">完成实名认证后才能提现（平台资金合规要求）</span>' +
+        '<button class="btn btn-soft btn-sm" data-action="nav" data-route="kyc">去认证</button></div>';
+    var wdRows = (w.withdrawals || []).map(function (wd) {
+      var st = wd.status === 'paid' ? '<span class="badge b-green">已打款</span>' : '<span class="badge b-gold">受理中</span>';
+      return '<tr><td class="num">¥' + money(wd.amount) + '</td><td>' + st + '</td><td style="color:var(--muted)">' + timeAgo(wd.createdAt) + '</td></tr>';
+    }).join('');
     var txRows = w.tx.map(function (t) {
       var plus = t.amount > 0;
       return '<tr><td class="strong">' + esc(t.title) + '</td><td>' + (plus ? '<span class="badge b-green">收入</span>' : '<span class="badge b-red">支出</span>') + '</td>' +
         '<td class="tx-amount ' + (plus ? 'plus' : 'minus') + '">' + (plus ? '+' : '') + '¥' + money(Math.abs(t.amount)) + '</td>' +
         '<td style="color:var(--muted)">' + timeAgo(t.at) + '</td></tr>';
     }).join('');
-    return '<div class="page-head"><h1>' + icon('i-wallet') + '收益钱包</h1><div class="sub">服务端实时账本 · 每一笔资金变动都有据可查</div></div>' +
-      '<div class="split">' +
+    return '<div class="page-head"><h1>' + icon('i-wallet') + '收益钱包</h1><div class="sub">服务端实时账本 · 结算收取 10% 平台服务费，余额可提现</div></div>' +
+      kycBanner +
+      '<div class="split" style="margin-top:16px">' +
         '<div>' +
           '<div class="wallet-hero">' +
             '<div style="font-size:13px;opacity:.75">可用余额</div>' +
@@ -691,6 +775,11 @@
             '</div>' +
           '</div>' +
           '<div class="card" style="margin-top:16px"><div class="card-title">' + icon('i-chart') + '近 7 日收益</div><canvas class="chart" id="walletChart"></canvas></div>' +
+          '<div class="card" style="margin-top:16px;padding:0"><div class="card-title" style="padding:16px 18px 0">提现记录</div>' +
+            (w.withdrawals && w.withdrawals.length
+              ? '<div class="table-wrap" style="border:none;margin-top:8px"><table class="data"><thead><tr><th>金额</th><th>状态</th><th>时间</th></tr></thead><tbody>' + wdRows + '</tbody></table></div>'
+              : '<div class="empty" style="padding:24px"><p style="font-size:13px">暂无提现记录</p></div>') +
+          '</div>' +
           '<div class="card" style="margin-top:16px;padding:0"><div class="card-title" style="padding:16px 18px 0">收支明细</div>' +
             (w.tx.length
               ? '<div class="table-wrap" style="border:none;margin-top:8px"><table class="data"><thead><tr><th>事项</th><th>类型</th><th>金额</th><th>时间</th></tr></thead><tbody>' + txRows + '</tbody></table></div>'
@@ -732,11 +821,11 @@
       var e = r.list[i];
       if (!e) return '<div class="pod pod' + (i + 1) + '"><div class="rank-ico">' + medals[i] + '</div><div class="pod-name">虚位以待</div><div class="pod-amt">¥0</div></div>';
       return '<div class="pod pod' + (i + 1) + '"><div class="rank-ico">' + medals[i] + '</div>' +
-        '<div class="pod-name">' + esc(e.name) + (e.seed ? ' <span class="badge b-gray">示例</span>' : '') + '</div>' +
+        '<div class="pod-name"><a href="#/creator/' + esc(e.uid || '') + '" data-action="close-layers-nav">' + esc(e.name) + '</a></div>' +
         '<div class="pod-amt">¥' + money(e.amt) + '</div></div>';
     }).join('');
     var rows = r.list.slice(3).map(function (e, i) {
-      return '<tr><td class="strong">' + (i + 4) + '</td><td class="strong">' + esc(e.name) + (e.seed ? ' <span class="badge b-gray">示例</span>' : '') + '</td>' +
+      return '<tr><td class="strong">' + (i + 4) + '</td><td class="strong"><a href="#/creator/' + esc(e.uid || '') + '" data-action="close-layers-nav">' + esc(e.name) + '</a></td>' +
         '<td class="num">¥' + money(e.amt) + '</td></tr>';
     }).join('');
     var mine = r.me
@@ -822,7 +911,7 @@
 
   /* ---------------- 商家端：发布任务向导 ---------------- */
   function freshWizard() {
-    return { step: 1, platforms: ['xhs'], mode: 'fixed', title: '', reward: '', capacity: '', days: 7, fanMin: 1000, desc: '', reqs: '' };
+    return { step: 1, platforms: ['xhs'], mode: 'fixed', reviewMode: 'manual', title: '', reward: '', capacity: '', days: 7, fanMin: 1000, desc: '', reqs: '' };
   }
   function viewCreate() {
     if (!S.wizard) S.wizard = freshWizard();
@@ -855,6 +944,10 @@
         '<div class="field-row">' +
         '<div class="field"><label>截止天数</label><input class="input" id="wzDays" type="number" min="1" value="' + w.days + '"></div>' +
         '<div class="field"><label>粉丝门槛</label><input class="input" id="wzFan" type="number" min="0" value="' + w.fanMin + '"></div></div>' +
+        '<div class="field"><label>验收方式</label><div class="chip-row">' +
+          '<button class="chip ' + (w.reviewMode !== 'auto' ? 'active' : '') + '" data-action="w-review" data-v="manual">人工验收（推荐）· 72h 超时自动通过</button>' +
+          '<button class="chip ' + (w.reviewMode === 'auto' ? 'active' : '') + '" data-action="w-review" data-v="auto">平台自动验收 · 提交后秒结</button>' +
+        '</div></div>' +
         '<div style="padding:14px;border-radius:12px;background:var(--brand-grad-soft);font-size:13px">' +
           '托管预算：<b>¥' + money(budget) + '</b>（单价 × 名额，发布时从余额冻结进平台托管账户）' +
           '<div style="margin-top:4px;color:var(--muted)">当前余额 ¥' + money(balance) + (short ? ' · <b style="color:var(--red)">余额不足，请先充值</b>' : ' · 余额充足') + '</div>' +
@@ -878,6 +971,192 @@
       '</div>';
   }
 
+  /* ---------------- 验收抽屉 ---------------- */
+  function openReviewDrawer(campaignId) {
+    S.campaignOrderId = campaignId;
+    Api.campaignOrders(campaignId).then(function (r) {
+      C.reviewOrders = r.orders;
+      C.reviewTask = r.task;
+      renderReviewDrawer();
+    }).catch(handleErr);
+  }
+  function renderReviewDrawer() {
+    var t = C.reviewTask || {};
+    var rows = C.reviewOrders.map(function (o) {
+      var creator = o.creator || {};
+      var stMap = {
+        todo: '<span class="dot-status st-todo">创作中</span>',
+        review: '<span class="dot-status st-review">待验收</span>',
+        rejected: '<span class="dot-status st-todo">已退回</span>',
+        settled: '<span class="dot-status st-settled">已结算 ¥' + money(o.income !== undefined ? o.income : o.paid) + '</span>',
+        cancelled: '<span class="dot-status st-off">已取消</span>'
+      };
+      var acts = '';
+      if (o.status === 'review') {
+        acts = '<button class="btn btn-green btn-sm" data-action="approve-order" data-id="' + o.id + '">' + icon('i-check') + '通过</button>' +
+               '<button class="btn btn-danger btn-sm" data-action="reject-order" data-id="' + o.id + '">退回</button>';
+      }
+      return '<div class="interact-row" style="flex-wrap:wrap">' +
+        '<div class="interact-main">' +
+          '<h4><a href="#/creator/' + esc(creator.id || '') + '" data-action="close-layers-nav" style="color:var(--gold)">' + esc(creator.name || '达人') + '</a>' +
+          ' <span class="badge b-gray">信用 ' + (creator.credit || 80) + '</span></h4>' +
+          '<p>接单 ' + timeAgo(o.acceptedAt) + (o.link ? ' · <a href="' + esc(o.link) + '" target="_blank" rel="noopener" style="color:var(--cyan)">查看作品 ↗</a>' : ' · 未提交') + '</p>' +
+          (o.status === 'rejected' && o.rejectReason ? '<p style="color:var(--red)">已退回：' + esc(o.rejectReason) + '</p>' : '') +
+        '</div>' + (stMap[o.status] || '') +
+        '<div style="display:flex;gap:8px;flex:none">' + acts + '</div></div>';
+    }).join('');
+    openDrawer(
+      '<div class="drawer-head"><h2 style="font-size:18px;font-weight:800">验收队列</h2>' +
+      '<button class="drawer-close" data-action="close-layers">' + icon('i-close') + '</button></div>' +
+      '<p style="font-size:13px;color:var(--muted);margin:8px 0 16px">' + esc(t.title || '') + ' · ' +
+      (t.reviewMode === 'auto' ? '自动验收模式' : '人工验收 · 72h 未处理自动通过') + '</p>' +
+      (rows || '<div class="empty">' + icon('i-users') + '<p>还没有达人接单</p></div>') +
+      '<p style="margin-top:16px;font-size:12.5px;color:var(--muted)">' + icon('i-shield', 'ic-sm') +
+      ' 验收通过即从托管预算划付：结算额 × 90% 付达人，10% 为平台服务费。请客观验收，恶意拒稿将影响商家信用。</p>'
+    );
+  }
+  /* ================================================================
+     新增视图：消息中心 / 认证中心 / 达人主页 / 协议 / 隐私 / 运营后台
+     ================================================================ */
+  function viewMessages() {
+    var list = C.messages || [];
+    var rows = list.map(function (m) {
+      var typeMap = {
+        order_settled: ['b-green'], order_rejected: ['b-red'], order_review: ['b-blue'],
+        invite_bonus: ['b-gold'], task_paused: ['b-red'], content_published: ['b-cyan'],
+        withdraw_pending: ['b-blue'], report_resolved: ['b-green'], kyc_ok: ['b-green'],
+        biz_ok: ['b-green'], order_cancelled: ['b-gray']
+      };
+      var cls = (typeMap[m.type] || ['b-gray'])[0];
+      return '<div class="interact-row' + (m.read ? '' : ' msg-unread') + '" data-action="msg-read" data-id="' + m.id + '" style="cursor:pointer">' +
+        '<div class="interact-main"><h4>' + esc(m.title) + ' <span class="badge ' + cls + '">消息</span></h4>' +
+        '<p>' + esc(m.body) + '</p></div>' +
+        '<span style="font-size:12px;color:var(--muted);white-space:nowrap">' + timeAgo(m.at) + (m.read ? '' : ' <span class="dot-status st-review">未读</span>') + '</span></div>';
+    }).join('');
+    return '<div class="page-head" style="display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap">' +
+      '<div><h1>' + icon('i-bell') + '消息中心</h1><div class="sub">结算、验收、拒稿、返佣等关键事件实时送达</div></div>' +
+      (C.unread > 0 ? '<button class="btn btn-ghost btn-sm" data-action="msg-read-all">' + icon('i-check') + '全部标为已读</button>' : '') +
+      '</div>' +
+      (list.length
+        ? '<div style="display:flex;flex-direction:column;gap:10px">' + rows + '</div>'
+        : '<div class="card empty">' + icon('i-bell') + '<p>暂无消息。接单、结算、验收动态都会第一时间出现在这里。</p></div>');
+  }
+
+  function viewKyc() {
+    var me = C.me || {};
+    var kyc = me.kyc, biz = me.biz;
+    var kycCard = kyc && kyc.status === 'verified'
+      ? '<div class="card"><div class="card-title">' + icon('i-shield') + '实名认证 · 已通过</div>' +
+        '<p style="font-size:13.5px;color:var(--text2)">姓名：' + esc(kyc.realName) + '（证号尾号 ' + esc(String(me.idTail || kyc.realName ? '****' : '')) + '）</p>' +
+        '<p style="font-size:12.5px;color:var(--muted);margin-top:6px">提现功能已解锁。依据平台合规要求，实名信息加密存储仅用于出金校验。</p></div>'
+      : '<div class="card"><div class="card-title">' + icon('i-shield') + '达人实名认证</div>' +
+        '<p style="font-size:13px;color:var(--muted);margin-bottom:14px">提现前必须完成。演示环境提交即自动过审，真实环境将对接运营商二要素/四要素核验接口。</p>' +
+        '<div class="field"><label>真实姓名</label><input class="input" id="kycName" placeholder="与证件一致" maxlength="20"></div>' +
+        '<div class="field"><label>证件号后 4 位</label><input class="input" id="kycTail" placeholder="例如 1234" maxlength="4"></div>' +
+        '<button class="btn btn-primary btn-block" data-action="kyc-submit">提交认证</button></div>';
+    var bizCard = biz && biz.status === 'verified'
+      ? '<div class="card"><div class="card-title">' + icon('i-megaphone') + '商家资质 · 已认证</div>' +
+        '<p style="font-size:13.5px;color:var(--text2)">企业/品牌：' + esc(biz.bizName) + '</p>' +
+        '<p style="font-size:12.5px;color:var(--muted);margin-top:6px">执照号：' + esc(biz.licenseNo) + ' · 已可发布投放任务</p></div>'
+      : '<div class="card"><div class="card-title">' + icon('i-megaphone') + '商家资质认证</div>' +
+        '<p style="font-size:13px;color:var(--muted);margin-bottom:14px">发布投放任务前必须完成。演示环境提交即自动过审。</p>' +
+        '<div class="field"><label>企业 / 品牌名称</label><input class="input" id="bizName" placeholder="与执照一致" maxlength="40"></div>' +
+        '<div class="field"><label>营业执照号 / 统一社会信用代码</label><input class="input" id="bizNo" placeholder="15-18 位" maxlength="20"></div>' +
+        '<button class="btn btn-primary btn-block" data-action="biz-submit">提交认证</button></div>';
+    return '<div class="page-head"><h1>' + icon('i-shield') + '认证中心</h1><div class="sub">实名与资质是平台资金与广告合规的基础</div></div>' +
+      '<div class="grid grid-2">' + kycCard + bizCard + '</div>' +
+      '<p style="margin-top:16px;font-size:12.5px;color:var(--muted)">' + icon('i-shield', 'ic-sm') +
+      ' 平台承诺：认证资料仅用于合规校验与出金风控，不用于任何对外展示（详见隐私政策）。</p>';
+  }
+
+  function viewAgreement() {
+    return '<div class="page-head"><h1>' + icon('i-book') + '用户服务协议</h1><div class="sub">更新日期：2026-09-11 · 使用本平台即视为同意本协议</div></div>' +
+      '<div class="card" style="line-height:2;font-size:13.5px;color:var(--text2)">' +
+      '<p><b style="color:var(--text)">1. 平台性质。</b>光体•财无界为内容创作任务撮合平台，为商家（投放方）与达人（创作方）提供任务发布、接单、验收与资金托管服务。平台按任务结算额收取 10% 技术服务费。</p>' +
+      '<p><b style="color:var(--text)">2. 账号与实名。</b>用户应提供真实信息；提现须完成实名认证。账号不得出借、转让，因账号保管不善造成的损失由用户自行承担。</p>' +
+      '<p><b style="color:var(--text)">3. 资金与结算。</b>商家发布任务需将预算全额冻结至平台托管账户；达人作品经商家验收（或超出 72 小时未验收视为通过）后，托管资金扣除平台服务费后划付达人。平台对刷量、抄袭等作弊行为有权拒付并追回已结算款项。</p>' +
+      '<p><b style="color:var(--text)">4. 内容规范。</b>任务与作品不得违反法律法规及社会公序良俗，不得含有虚假宣传、侵犯第三方权利的内容。平台有权对违规任务做下架处理并对责任方进行信用扣减。</p>' +
+      '<p><b style="color:var(--text)">5. 知识产权。</b>达人交付内容后，商家获得约定范围内的使用权，达人保留署名权；另有约定以任务页说明为准。</p>' +
+      '<p><b style="color:var(--text)">6. 免责与变更。</b>因不可抗力、平台数据接口异常导致的结算延迟，平台不承担赔偿责任但会协助追偿。本协议如有变更将在站内公告。</p>' +
+      '</div>';
+  }
+
+  function viewPrivacy() {
+    return '<div class="page-head"><h1>' + icon('i-shield') + '隐私政策</h1><div class="sub">更新日期：2026-09-11</div></div>' +
+      '<div class="card" style="line-height:2;font-size:13.5px;color:var(--text2)">' +
+      '<p><b style="color:var(--text)">1. 我们收集什么。</b>账号信息（用户名、密码哈希）；实名信息（姓名、证件后 4 位，仅提现校验）；商家资质（企业名称、执照号）；平台行为数据（任务、订单、账单）。</p>' +
+      '<p><b style="color:var(--text)">2. 我们如何使用。</b>实名与资质信息仅用于合规校验与出金风控，不对其他用户展示完整证件信息；行为数据用于结算、信用分与榜单。</p>' +
+      '<p><b style="color:var(--text)">3. 存储与安全。</b>密码经加盐哈希存储，任何人不可还原明文；认证资料与账本数据存储于服务端数据库并以访问控制保护。</p>' +
+      '<p><b style="color:var(--text)">4. 第三方共享。</b>仅在支付通道打款等必要场景向支付服务商提供最小必要信息；不会向广告商出售任何用户数据。</p>' +
+      '<p><b style="color:var(--text)">5. 你的权利。</b>可随时在站内查看、更正个人信息；注销账号前请结清在途订单与提现。</p>' +
+      '</div>';
+  }
+
+  function viewProfile() {
+    var p = C.profile;
+    if (!p) return '<div class="card empty">' + icon('i-users') + '<p>用户不存在或已注销</p></div>';
+    var stars = p.avgStars > 0 ? '★ ' + p.avgStars.toFixed(1) : '暂无评分';
+    var ratings = (p.ratings || []).map(function (r) {
+      return '<div class="interact-row"><div class="interact-main"><h4>' + '★'.repeat(r.stars) + '<span style="color:var(--muted)">' + '☆'.repeat(5 - r.stars) + '</span></h4><p>' + esc(r.text || '商家未填写评价') + '</p></div>' +
+        '<span style="font-size:12px;color:var(--muted)">' + timeAgo(r.at) + '</span></div>';
+    }).join('');
+    var contents = (p.contents || []).map(function (c) {
+      return '<div class="interact-row"><div class="interact-main"><h4>' + esc(c.title) + '</h4><p>' + timeAgo(c.at) + '</p></div></div>';
+    }).join('');
+    return '<div class="page-head"><h1>' + icon('i-users') + esc(p.name) + '的主页</h1>' +
+      '<div class="sub">' + (p.role === 'merchant' ? '商家' : '创作者') + ' · ' + (p.kyc ? '已实名' : '未实名') + (p.biz ? ' · 资质认证「' + esc(p.biz.bizName) + '」' : '') + ' · 加入于 ' + new Date(p.joinedAt).toLocaleDateString('zh-CN') + '</div></div>' +
+      '<div class="stat-strip" style="grid-template-columns:repeat(4,1fr)">' +
+      '<div class="stat-card"><div class="num">' + p.credit + '</div><div class="lab">信用分</div></div>' +
+      '<div class="stat-card"><div class="num">' + p.completionRate + '%</div><div class="lab">完成率（' + p.doneCount + '/' + (p.doneCount + p.rejectCount) + '）</div></div>' +
+      '<div class="stat-card"><div class="num" style="font-size:19px">' + stars + '</div><div class="lab">商家评分</div></div>' +
+      '<div class="stat-card"><div class="num">¥' + money(p.totalEarn) + '</div><div class="lab">累计收益</div></div>' +
+      '</div>' +
+      '<div class="grid grid-2">' +
+      '<div class="card"><div class="card-title">' + icon('i-star') + '近期评价</div>' + (ratings || '<p style="font-size:13px;color:var(--muted)">暂无评价</p>') + '</div>' +
+      '<div class="card"><div class="card-title">' + icon('i-book') + '内容作品</div>' + (contents || '<p style="font-size:13px;color:var(--muted)">暂无公开内容</p>') + '</div>' +
+      '</div>';
+  }
+
+  function viewAdmin() {
+    if (!S.adminKey) {
+      return '<div class="page-head"><h1>' + icon('i-shield') + '运营后台</h1><div class="sub">仅限平台运营人员</div></div>' +
+        '<div class="card" style="max-width:420px;margin:40px auto">' +
+        '<div class="field"><label>运营密钥（Admin Key）</label><input class="input" id="admKey" type="password" placeholder="与服务端 ADMIN_KEY 一致"></div>' +
+        '<button class="btn btn-primary btn-block" data-action="admin-login">进入后台</button>' +
+        '<p style="font-size:12px;color:var(--muted);margin-top:10px">演示默认密钥：gt-admin-demo（可在服务端环境变量 ADMIN_KEY 修改）</p></div>';
+    }
+    var a = C.admin;
+    if (!a) return '<div class="loading-wrap"><div class="spinner"></div><p>加载运营数据…</p></div>';
+    var wd = (C.adminWithdrawals || []);
+    var wdRows = wd.map(function (x) {
+      return '<tr><td>' + x.id.slice(0, 10) + '…</td><td class="num">¥' + money(x.amount) + '</td>' +
+        '<td>' + (x.status === 'pending' ? '<span class="badge b-gold">待打款</span>' : '<span class="badge b-green">已打款</span>') + '</td>' +
+        '<td>' + (x.status === 'pending' ? '<button class="btn btn-primary btn-sm" data-action="admin-wd-settle" data-id="' + x.id + '">标记打款</button>' : '') + '</td></tr>';
+    }).join('');
+    var rp = (C.adminReports || []);
+    var rpRows = rp.map(function (x) {
+      return '<tr><td class="strong">' + esc(x.targetType) + '</td><td style="white-space:normal">' + esc(x.reason) + '</td>' +
+        '<td>' + esc(x.reporter || '') + '</td>' +
+        '<td>' + (x.status === 'open' ? '<span class="badge b-red">待处理</span>' : '<span class="badge b-green">已处理</span>') + '</td>' +
+        '<td>' + (x.status === 'open' ? '<button class="btn btn-ghost btn-sm" data-action="admin-rp-resolve" data-id="' + x.id + '">标记处理</button>' : '') + '</td></tr>';
+    }).join('');
+    return '<div class="page-head" style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:10px">' +
+      '<div><h1>' + icon('i-shield') + '运营后台</h1><div class="sub">平台收入 / 提现打款 / 举报处理 / 任务下架</div></div>' +
+      '<button class="btn btn-ghost btn-sm" data-action="admin-logout">退出后台</button></div>' +
+      '<div class="stat-strip" style="grid-template-columns:repeat(4,1fr)">' +
+      '<div class="stat-card"><div class="num">¥' + money(a.platformRevenue) + '</div><div class="lab">平台服务费收入</div></div>' +
+      '<div class="stat-card"><div class="num">¥' + money(a.escrow) + '</div><div class="lab">托管池余额</div></div>' +
+      '<div class="stat-card"><div class="num">' + a.users + '</div><div class="lab">注册用户（达人 ' + a.creators + '）</div></div>' +
+      '<div class="stat-card"><div class="num">' + a.settledOrders + '/' + a.orders + '</div><div class="lab">已结/总订单</div></div>' +
+      '</div>' +
+      '<div class="grid grid-2">' +
+      '<div class="card"><div class="card-title">' + icon('i-wallet') + '提现审批（待处理 ' + a.pendingWithdrawals + '）</div>' +
+      '<div class="table-wrap"><table class="data"><thead><tr><th>单号</th><th>金额</th><th>状态</th><th></th></tr></thead><tbody>' + (wdRows || '<tr><td colspan="4" style="color:var(--muted)">暂无</td></tr>') + '</tbody></table></div></div>' +
+      '<div class="card"><div class="card-title">' + icon('i-shield') + '举报处理（待处理 ' + a.openReports + '）</div>' +
+      '<div class="table-wrap"><table class="data"><thead><tr><th>类型</th><th>理由</th><th>举报人</th><th>状态</th><th></th></tr></thead><tbody>' + (rpRows || '<tr><td colspan="5" style="color:var(--muted)">暂无</td></tr>') + '</tbody></table></div></div>' +
+      '</div>';
+  }
+
   /* ---------------- 商家端：任务管理 ---------------- */
   function viewCampaigns() {
     if (!C.campaigns.length) {
@@ -897,9 +1176,10 @@
         '<td>' + (c.status === 'on'
           ? '<span class="dot-status st-settled">投放中</span>'
           : '<span class="dot-status st-off">已暂停</span>') + '</td>' +
-        '<td><button class="btn btn-ghost btn-sm" data-action="camp-toggle" data-id="' + c.id + '">' + (c.status === 'on' ? '暂停投放' : '恢复投放') + '</button></td></tr>';
+        '<td><button class="btn btn-soft btn-sm" data-action="review-open" data-id="' + c.id + '">' + icon('i-check') + '验收</button>' +
+        '<button class="btn btn-ghost btn-sm" data-action="camp-toggle" data-id="' + c.id + '">' + (c.status === 'on' ? '暂停' : '恢复') + '</button></td></tr>';
     }).join('');
-    return '<div class="page-head"><h1>' + icon('i-megaphone') + '任务管理</h1><div class="sub">共 ' + C.campaigns.length + ' 个任务 · 预算已托管，结算自动划付</div></div>' +
+    return '<div class="page-head"><h1>' + icon('i-megaphone') + '任务管理</h1><div class="sub">共 ' + C.campaigns.length + ' 个任务 · 预算已托管，验收后自动划付（扣 10% 服务费）</div></div>' +
       '<div class="card" style="padding:0"><div class="table-wrap" style="border:none"><table class="data">' +
       '<thead><tr><th>任务名称</th><th>平台</th><th>模式</th><th>接单进度</th><th>托管预算</th><th>已消耗</th><th>状态</th><th>操作</th></tr></thead>' +
       '<tbody>' + rows + '</tbody></table></div></div>';
@@ -922,7 +1202,11 @@
         ? '<div class="field"><label>选择身份</label><select class="select" id="authRole" style="width:100%">' +
           '<option value="creator">达人 · 接任务赚钱（送 ¥8 新人礼）</option>' +
           '<option value="merchant">商家 · 发布投放（送 ¥8,888 开业广告金）</option></select></div>' +
-          '<div class="field"><label>邀请码（选填）</label><input class="input" id="authInvite" placeholder="填写好友邀请码，绑定后其享你的任务收益返佣" maxlength="12"></div>'
+          '<div class="field"><label>邀请码（选填）</label><input class="input" id="authInvite" placeholder="填写好友邀请码，绑定后其享你的任务收益返佣" maxlength="12"></div>' +
+          '<div class="field" style="font-size:12.5px;color:var(--muted)">' +
+          '<label style="display:flex;align-items:flex-start;gap:8px;font-weight:400;cursor:pointer">' +
+          '<input type="checkbox" id="authAgree" style="margin-top:3px">' +
+          '<span>我已阅读并同意 <a href="#/agreement" data-action="close-layers-nav" style="color:var(--gold)">《用户服务协议》</a>与 <a href="#/privacy" data-action="close-layers-nav" style="color:var(--gold)">《隐私政策》</a></span></label></div>'
         : '') +
       '<div class="modal-actions"><button class="btn btn-ghost" data-action="close-layers">取消</button>' +
       '<button class="btn btn-primary" data-action="auth-submit">' + (isLogin ? '登录' : '注册并进入') + '</button></div>');
@@ -985,9 +1269,20 @@
       '<div class="stat-card" style="padding:10px"><div class="num" style="font-size:17px">¥' + money(C.me.balance) + '</div><div class="lab">余额</div></div>' +
       '<div class="stat-card" style="padding:10px"><div class="num" style="font-size:17px">' + C.orders.length + '</div><div class="lab">任务</div></div>' +
       '<div class="stat-card" style="padding:10px"><div class="num" style="font-size:17px">' + C.contents.length + '</div><div class="lab">内容</div></div></div>' +
-      '<div class="modal-actions" style="justify-content:space-between">' +
-      '<button class="btn btn-danger" data-action="logout">退出登录</button>' +
-      '<button class="btn btn-ghost" data-action="close-layers">关闭</button></div>');
+      '<div class="modal-actions" style="justify-content:space-between;flex-wrap:wrap;gap:8px">' +
+      '<button class="btn btn-danger btn-sm" data-action="logout">退出登录</button>' +
+      '<div style="display:flex;gap:8px">' +
+      '<button class="btn btn-ghost btn-sm" data-action="close-layers-nav" data-route="kyc">认证中心</button>' +
+      '<button class="btn btn-ghost btn-sm" data-action="pwd-open">修改密码</button>' +
+      '<button class="btn btn-ghost btn-sm" data-action="close-layers">关闭</button></div></div>');
+  }
+  function modalPassword() {
+    openModal(
+      '<h3>修改密码</h3><div class="modal-sub">修改成功后其他设备将自动退出</div>' +
+      '<div class="field"><label>当前密码</label><input class="input" id="pwdOld" type="password"></div>' +
+      '<div class="field"><label>新密码（至少 6 位）</label><input class="input" id="pwdNew" type="password"></div>' +
+      '<div class="modal-actions"><button class="btn btn-ghost" data-action="close-layers">取消</button>' +
+      '<button class="btn btn-primary" data-action="pwd-submit">确认修改</button></div>');
   }
 
   /* ================================================================
@@ -1130,15 +1425,20 @@
     try {
       var r = await Api.createTask({
         title: w.title, mode: w.mode, reward: Number(w.reward), capacity: Number(w.capacity),
-        days: w.days, fanMin: w.fanMin, desc: w.desc, reqs: w.reqs, platforms: w.platforms
+        days: w.days, fanMin: w.fanMin, desc: w.desc, reqs: w.reqs, platforms: w.platforms,
+        reviewMode: w.reviewMode
       });
       if (C.me && r.balance !== undefined) C.me.balance = r.balance;
       S.wizard = freshWizard();
       toast('任务发布成功，预算已托管，已进入达人任务广场 🎉');
       location.hash = '#/campaigns';
     } catch (e) {
+      if (e.code === 'need_biz') {
+        toast('请先完成商家资质认证', 'warn');
+        location.hash = '#/kyc';
+        return;
+      }
       handleErr(e);
-      if (e.need) { /* 余额不足，可前往充值 */ }
     }
   }
 
@@ -1172,7 +1472,9 @@
   var VIEWS = {
     market: viewMarket, my: viewMy, publish: viewPublish, interact: viewInteract,
     checkin: viewCheckin, wallet: viewWallet, rank: viewRank, help: viewHelp,
-    dash: viewDash, create: viewCreate, campaigns: viewCampaigns
+    dash: viewDash, create: viewCreate, campaigns: viewCampaigns,
+    messages: viewMessages, kyc: viewKyc, admin: viewAdmin,
+    agreement: viewAgreement, privacy: viewPrivacy, profile: viewProfile
   };
 
   function render() {
@@ -1398,6 +1700,164 @@
         if (navigator.clipboard) navigator.clipboard.writeText('feedback@guangti.demo');
         toast('反馈邮箱已复制：feedback@guangti.demo');
         break;
+      case 'close-layers-nav': {
+        var navRoute = el.getAttribute('data-route');
+        closeLayers();
+        if (navRoute) location.hash = '#/' + navRoute;
+        break;
+      }
+      case 'msg-read':
+        Api.readMessage(el.getAttribute('data-id')).then(function () {
+          var m = C.messages.filter(function (x) { return x.id === el.getAttribute('data-id'); })[0];
+          if (m && !m.read) { m.read = true; C.unread = Math.max(0, C.unread - 1); renderUser(); }
+          render();
+        }).catch(handleErr);
+        break;
+      case 'msg-read-all':
+        Api.readAllMessages().then(async function () {
+          C.unread = 0;
+          await refreshCurrent().catch(function () {});
+          render();
+          toast('已全部标为已读');
+        }).catch(handleErr);
+        break;
+      case 'kyc-submit': {
+        var kn = ($('#kycName') || {}).value || '';
+        var kt = ($('#kycTail') || {}).value || '';
+        Api.kyc(kn, kt).then(async function (r) {
+          if (C.me) C.me.kyc = r.kyc;
+          toast('实名认证通过，提现已解锁');
+          await refreshCurrent().catch(function () {});
+          render();
+        }).catch(handleErr);
+        break;
+      }
+      case 'biz-submit': {
+        var bn = ($('#bizName') || {}).value || '';
+        var bno = ($('#bizNo') || {}).value || '';
+        Api.biz(bn, bno).then(async function (r) {
+          if (C.me) C.me.biz = r.biz;
+          toast('商家资质认证通过，现在可以发布投放任务了');
+          await refreshCurrent().catch(function () {});
+          render();
+        }).catch(handleErr);
+        break;
+      }
+      case 'report-task':
+        requireAuth(function () {
+          openModal(
+            '<h3>举报任务</h3><div class="modal-sub">平台将在 24 小时内核实处理，恶意举报将被扣减信用分</div>' +
+            '<div class="field"><label>举报理由（至少 5 个字）</label><textarea id="reportReason" placeholder="例如：描述涉嫌夸大收益 / 搬运他人内容 / 要求垫付资金…"></textarea></div>' +
+            '<div class="modal-actions"><button class="btn btn-ghost" data-action="close-layers">取消</button>' +
+            '<button class="btn btn-primary" data-action="report-submit" data-id="' + el.getAttribute('data-id') + '">提交举报</button></div>');
+        });
+        break;
+      case 'report-submit':
+        Api.report('task', el.getAttribute('data-id'), ($('#reportReason') || {}).value).then(function () {
+          closeLayers();
+          toast('举报已提交，平台会尽快核实处理');
+        }).catch(handleErr);
+        break;
+      case 'review-open': openReviewDrawer(el.getAttribute('data-id')); break;
+      case 'approve-order':
+        openModal(
+          '<h3>验收通过</h3><div class="modal-sub">通过后立即从托管预算划付结算（达人实收 90%，10% 平台服务费）</div>' +
+          '<div class="field"><label>为这次服务评分</label><select class="select" id="apStars" style="width:100%">' +
+          '<option value="5">★★★★★ 非常满意</option><option value="4">★★★★ 满意</option>' +
+          '<option value="3">★★★ 一般</option><option value="2">★★ 不满意</option><option value="1">★ 很差</option></select></div>' +
+          '<div class="field"><label>评价（选填）</label><input class="input" id="apText" placeholder="给达人的公开评价" maxlength="60"></div>' +
+          '<div class="modal-actions"><button class="btn btn-ghost" data-action="close-layers">取消</button>' +
+          '<button class="btn btn-green" data-action="approve-confirm" data-id="' + el.getAttribute('data-id') + '">确认通过并结算</button></div>');
+        break;
+      case 'approve-confirm':
+        Api.approveOrder(el.getAttribute('data-id'), Number(($('#apStars') || {}).value), ($('#apText') || {}).value)
+          .then(async function () {
+            closeLayers();
+            toast('已验收通过，托管资金已划付');
+            await refreshCurrent().catch(function () {});
+            render();
+          }).catch(handleErr);
+        break;
+      case 'reject-order':
+        openModal(
+          '<h3>退回作品</h3><div class="modal-sub">请写明修改方向，达人修改后可重新提交（同一订单最多重提 2 次）</div>' +
+          '<div class="field"><label>拒稿理由（至少 5 个字）</label><textarea id="rjReason" placeholder="例如：画面曝光不足，请补充分镜细节"></textarea></div>' +
+          '<div class="modal-actions"><button class="btn btn-ghost" data-action="close-layers">取消</button>' +
+          '<button class="btn btn-danger" data-action="reject-confirm" data-id="' + el.getAttribute('data-id') + '">确认退回</button></div>');
+        break;
+      case 'reject-confirm': {
+        var rjReason = ($('#rjReason') || {}).value || '';
+        Api.rejectOrder(el.getAttribute('data-id'), rjReason).then(async function () {
+          closeLayers();
+          toast('已退回达人修改');
+          if (S.campaignOrderId) openReviewDrawer(S.campaignOrderId);
+          await refreshCurrent().catch(function () {});
+        }).catch(handleErr);
+        break;
+      }
+      case 'resubmit-link':
+        openModal(
+          '<h3>修改后重新提交</h3><div class="modal-sub">提交后重新进入商家验收队列</div>' +
+          '<div class="field"><label>新的作品链接</label><input class="input" id="linkInput" placeholder="https://…"></div>' +
+          '<div class="modal-actions"><button class="btn btn-ghost" data-action="close-layers">取消</button>' +
+          '<button class="btn btn-primary" data-action="resubmit-go" data-id="' + el.getAttribute('data-id') + '">重新提交</button></div>');
+        break;
+      case 'resubmit-go':
+        requireAuth(function () {
+          var rl = ($('#linkInput') || {}).value || '';
+          if (!/^https?:\/\/.+/.test(rl)) { toast('请粘贴以 http(s):// 开头的链接', 'warn'); return; }
+          Api.resubmitOrder(el.getAttribute('data-id'), rl).then(async function () {
+            closeLayers();
+            toast('已重新提交，等待商家验收');
+            await refreshCurrent().catch(function () {});
+            render();
+          }).catch(handleErr);
+        });
+        break;
+      case 'content-del':
+        if (!confirm('确定删除这条内容？删除后不可恢复。')) return;
+        Api.deleteContent(el.getAttribute('data-id')).then(async function () {
+          toast('内容已删除');
+          await refreshCurrent().catch(function () {});
+          render();
+        }).catch(handleErr);
+        break;
+      case 'pwd-open': modalPassword(); break;
+      case 'pwd-submit':
+        var po = ($('#pwdOld') || {}).value || '';
+        var pn = ($('#pwdNew') || {}).value || '';
+        Api.changePassword(po, pn).then(function (r) {
+          Api.setToken(r.token);
+          closeLayers();
+          toast('密码已修改，其他设备已退出');
+        }).catch(handleErr);
+        break;
+      case 'w-review': S.wizard.reviewMode = el.getAttribute('data-v'); render(); break;
+      case 'admin-login':
+        S.adminKey = ($('#admKey') || {}).value || '';
+        sessionStorage.setItem('gt_admin_key', S.adminKey);
+        nav();
+        break;
+      case 'admin-logout':
+        S.adminKey = '';
+        sessionStorage.removeItem('gt_admin_key');
+        C.admin = null;
+        nav();
+        break;
+      case 'admin-wd-settle':
+        Api.admin.settleWithdrawal(S.adminKey, el.getAttribute('data-id')).then(async function () {
+          toast('已标记打款完成');
+          await refreshCurrent().catch(function () {});
+          render();
+        }).catch(handleErr);
+        break;
+      case 'admin-rp-resolve':
+        Api.admin.resolveReport(S.adminKey, el.getAttribute('data-id'), '已核实处理').then(async function () {
+          toast('举报已标记处理');
+          await refreshCurrent().catch(function () {});
+          render();
+        }).catch(handleErr);
+        break;
     }
   });
 
@@ -1409,6 +1869,8 @@
       if (S.authTab === 'register') {
         var role = (($('#authRole') || {}).value || 'creator');
         var invite = (($('#authInvite') || {}).value || '').trim();
+        var agreed = $('#authAgree') ? $('#authAgree').checked : true;
+        if (!agreed) { toast('请先阅读并同意用户服务协议与隐私政策', 'warn'); return; }
         r = await Api.register(uname, pwd, role, invite);
         toast('注册成功！' + (role === 'merchant' ? '¥8,888 开业广告金已到账' : '¥8 新人礼已到账'));
       } else {
@@ -1482,6 +1944,11 @@
     }, 400);
   }
   function handlePush(m) {
+    if (m.type === 'message') {
+      C.unread++;
+      renderUser();
+      return;
+    }
     if (!C.me) return;
     if (m.type === 'order_settled' && m.userId === C.me.id) {
       if (!S.notifiedOrders[m.orderId]) {
@@ -1518,7 +1985,11 @@
   (async function boot() {
     document.documentElement.setAttribute('data-theme', Api.theme.get());
     if (Api.getToken()) {
-      try { C.me = (await Api.me()).user; } catch (e) { Api.setToken(''); }
+      try {
+        C.me = (await Api.me()).user;
+        var msgData = await Api.messages();
+        C.unread = msgData.unread;
+      } catch (e) { Api.setToken(''); }
     }
     if (C.me) S.role = C.me.role === 'merchant' ? 'merchant' : 'creator';
     startLive();

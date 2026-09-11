@@ -27,6 +27,7 @@
           var err = new Error(data.error || ('请求失败 ' + res.status));
           err.status = res.status;
           err.need = data.need;
+          err.code = data.code;
           throw err;
         }
         return data;
@@ -73,6 +74,45 @@
 
     // 榜单
     rank: function () { return request('GET', '/api/rank'); },
+
+    // 认证中心（实名 / 商家资质）
+    kyc: function (realName, idTail) { return request('POST', '/api/kyc', { realName: realName, idTail: idTail }); },
+    biz: function (bizName, licenseNo) { return request('POST', '/api/biz', { bizName: bizName, licenseNo: licenseNo }); },
+
+    // 账号
+    changePassword: function (oldPassword, newPassword) { return request('POST', '/api/auth/password', { oldPassword: oldPassword, newPassword: newPassword }); },
+
+    // 站内消息
+    messages: function () { return request('GET', '/api/messages'); },
+    readMessage: function (id) { return request('POST', '/api/messages/' + id + '/read'); },
+    readAllMessages: function () { return request('POST', '/api/messages/read-all'); },
+
+    // 举报
+    report: function (targetType, targetId, reason) { return request('POST', '/api/reports', { targetType: targetType, targetId: targetId, reason: reason }); },
+
+    // 达人主页
+    userProfile: function (id) { return request('GET', '/api/users/' + id + '/profile'); },
+
+    // 验收
+    campaignOrders: function (id) { return request('GET', '/api/campaigns/' + id + '/orders'); },
+    approveOrder: function (id, rating, reviewText) { return request('POST', '/api/orders/' + id + '/approve', { rating: rating, reviewText: reviewText }); },
+    rejectOrder: function (id, reason) { return request('POST', '/api/orders/' + id + '/reject', { reason: reason }); },
+    resubmitOrder: function (id, link) { return request('POST', '/api/orders/' + id + '/resubmit', { link: link }); },
+
+    // 内容
+    deleteContent: function (id) { return request('DELETE', '/api/contents/' + id); },
+
+    // 运营后台
+    admin: {
+      overview: function (key) { return request('GET', '/api/admin/overview', undefined, undefined, { 'x-admin-key': key }); },
+      reports: function (key) { return request('GET', '/api/admin/reports', undefined, undefined, { 'x-admin-key': key }); },
+      resolveReport: function (key, id, result) { return request('POST', '/api/admin/reports/' + id + '/resolve', { result: result }, undefined, { 'x-admin-key': key }); },
+      banTask: function (key, id) { return request('POST', '/api/admin/tasks/' + id + '/ban', {}, undefined, { 'x-admin-key': key }); },
+      withdrawals: function (key) { return request('GET', '/api/admin/withdrawals', undefined, undefined, { 'x-admin-key': key }); },
+      settleWithdrawal: function (key, id) { return request('POST', '/api/admin/withdrawals/' + id + '/settle', {}, undefined, { 'x-admin-key': key }); },
+      sensitive: function (key) { return request('GET', '/api/admin/sensitive', undefined, undefined, { 'x-admin-key': key }); },
+      addSensitive: function (key, word) { return request('POST', '/api/admin/sensitive', { word: word }, undefined, { 'x-admin-key': key }); }
+    },
 
     // 会话与主题
     getToken: getToken,

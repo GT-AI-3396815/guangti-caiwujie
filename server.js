@@ -18,6 +18,14 @@
     adminKey: process.env.ADMIN_KEY || 'gt-admin-demo',
     // 新用户开业资金（平台账本授予，便于演示真实资金流）
     grants: { merchant: 8888, creator: 8 },
+    // 平台服务费：达人任务结算收入中平台抽成比例（商业模式科目）
+    platformFeeRate: 0.1,
+    // 商家验收窗口（小时）：超时未验收自动通过结算，防卡单
+    reviewWindowHours: 72,
+    // 接口限流 { 分类: [最大次数, 窗口毫秒] }
+    rateLimit: { auth: [40, 600000], write: [200, 60000], read: [400, 60000] },
+    // 会话有效期（毫秒，7 天滑动续期）
+    sessionTtl: 7 * 86400000,
     // 支付宝电脑网站支付（填入商户密钥后 recharge channel=alipay 自动启用真实收单）
     alipay: {
       enabled: false,
@@ -52,7 +60,12 @@
     try {
       if (fs.existsSync(DB_FILE)) db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
     } catch (e) { db = null; }
-    if (!db) { db = seedDB(); saveDB(); }
+    if (!db) { db = seedDB(); saveDB(); return; }
+    // 旧库升级：补齐后增字段，保证平滑兼容
+    var fresh = seedDB();
+    ['messages', 'reports'].forEach(function (k) { if (!Array.isArray(db[k])) db[k] = []; });
+    if (!Array.isArray(db.sensitiveWords) || !db.sensitiveWords.length) db.sensitiveWords = fresh.sensitiveWords;
+    if (typeof db.platformRevenue !== 'number') db.platformRevenue = 0;
   }
   var saveTimer = null;
   function saveDB() {
@@ -61,7 +74,10 @@
       saveTimer = null;
       try {
         if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-        fs.writeFileSync(DB_FILE, JSON.stringify(db));
+        // 原子写：先写临时文件再替换，避免断电/崩溃损坏账本
+        var tmp = DB_FILE + '.tmp';
+        fs.writeFileSync(tmp, JSON.stringify(db));
+        fs.renameSync(tmp, DB_FILE);
       } catch (e) { console.error('[db] save failed:', e.message); }
     }, 60);
   }
@@ -195,6 +211,10 @@
       withdrawals: [],
       txs: [],
       interactLog: [],
+      messages: [],
+      reports: [],
+      sensitiveWords: ['代刷', '刷单', '博彩', '赌博', '棋牌', '彩票', '外挂', '色情', '裸聊', '约炮', '迷药', '管制刀具', '枪支', '毒品', '代办证件', '发票代开', '洗钱', '传销', '刷粉', '僵尸粉'],
+      platformRevenue: 0,  // 平台服务费累计收入（商业模式科目）
       escrow: Math.round(budget * 100) / 100,  // 官方任务预存托管池
       escrowSeed: Math.round(budget * 100) / 100
     };
@@ -214,6 +234,31 @@
     user.balance = txr(user.balance + amount);
     if (EARN_TYPES.indexOf(type) >= 0) user.totalEarn = txr((user.totalEarn || 0) + amount);
     addTx(user.id, type, title, amount);
+  }
+
+  /* ---------------- 敏感词 ---------------- */
+  function findSensitive(text) {
+    var s = String(text || '').toLowerCase();
+    var words = db.sensitiveWords || [];
+    for (var i = 0; i < words.length; i++) {
+      if (s.indexOf(words[i].toLowerCase()) >= 0) return words[i];
+    }
+    return null;
+  }
+
+  /* ---------------- 站内消息 ---------------- */
+  function pushMsg(userId, type, title, body) {
+    if (!userId) return;
+    var m = { id: uid('msg'), userId: userId, type: type, title: title, body: body || '', read: false, at: Date.now() };
+    db.messages.push(m);
+    if (db.messages.length > 3000) db.messages.splice(0, 500);
+    sendTo(userId, { type: 'message', messageId: m.id });
+    return m;
+  }
+  function unreadCount(userId) {
+    var n = 0;
+    db.messages.forEach(function (m) { if (m.userId === userId && !m.read) n++; });
+    return n;
   }
   function debit(user, amount, type, title) {
     amount = txr(amount);
@@ -236,23 +281,46 @@
     if (!token) return null;
     var s = db.sessions[token];
     if (!s) return null;
+    // 会话 7 天滑动过期
+    if (CONFIG.sessionTtl && Date.now() - (s.lastSeen || s.at) > CONFIG.sessionTtl) {
+      delete db.sessions[token];
+      return null;
+    }
+    s.lastSeen = Date.now();
     return db.users.filter(function (u) { return u.id === s.userId; })[0] || null;
+  }
+  // 接口限流：按 IP + 分类滑动窗口
+  var rateBuckets = {};
+  function allowRate(category, ip) {
+    var conf = CONFIG.rateLimit[category];
+    if (!conf) return true;
+    var key = category + '|' + ip;
+    var now = Date.now();
+    var b = rateBuckets[key];
+    if (!b || now > b.reset) { rateBuckets[key] = { count: 1, reset: now + conf[1] }; return true; }
+    b.count++;
+    return b.count <= conf[0];
   }
   function publicUser(u) {
     return {
-      id: u.id, name: u.display, uname: u.name, role: u.role,
+      id: u.id, name: u.name, uname: u.name, role: u.role,
       balance: u.balance, totalEarn: u.totalEarn || 0, totalWithdraw: u.totalWithdraw || 0,
-      inviteCode: u.inviteCode, createdAt: u.createdAt
+      inviteCode: u.inviteCode, createdAt: u.createdAt,
+      email: u.email || '',
+      credit: u.credit === undefined ? 80 : u.credit,
+      kyc: u.kyc ? { status: u.kyc.status, realName: u.kyc.realName, at: u.kyc.at } : null,
+      biz: u.biz ? { status: u.biz.status, bizName: u.biz.bizName, licenseNo: u.biz.licenseNo, at: u.biz.at } : null
     };
   }
 
-  /* ---------------- 业务：结算 ---------------- */
+  /* ---------------- 业务：结算与验收 ---------------- */
   function settleAmount(t) {
     if (t.mode === 'fixed') return t.reward;
     if (t.mode === 'per') return txr(t.reward * rnd(5, 20));
     return txr(Math.round(t.reward * rnd(20, 60)) / 10);
   }
-  function settleOrder(order) {
+  // 结算订单：platformFee 为平台服务费（商业收入科目），达人实收 = paid - fee
+  function settleOrder(order, rating, reviewText, via) {
     if (order.status !== 'review') return;
     var t = db.tasks.filter(function (x) { return x.id === order.taskId; })[0];
     var u = db.users.filter(function (x) { return x.id === order.userId; })[0];
@@ -261,41 +329,86 @@
     var remaining = txr(taskBudget(t) - (t.spend || 0));
     var paid = Math.min(settleAmount(t), remaining);
     if (paid <= 0.005) {
-      // 预算耗尽：任务自动停投，订单留在审核队列由运营处理
+      // 预算耗尽：任务自动停投，订单留在验收队列由运营处理
       t.status = 'off';
       saveDB();
       sendTo(t.merchantId, { type: 'task_paused', title: t.title });
       broadcast({ type: 'refresh' });
       return;
     }
+    var fee = txr(paid * CONFIG.platformFeeRate);
+    var income = txr(paid - fee);
     // 商家任务从托管池划付；官方任务由平台预存托管池支付
     db.escrow = txr(db.escrow - paid);
+    db.platformRevenue = txr((db.platformRevenue || 0) + fee);
     t.spend = txr((t.spend || 0) + paid);
     order.status = 'settled';
     order.paid = paid;
+    order.income = income;
+    order.fee = fee;
     order.settledAt = Date.now();
-    credit(u, paid, 'task_income', '任务结算 · ' + t.title.slice(0, 14) + '…');
-    // 邀请返佣：达人获得任务收益时，邀请人得 10%（平台补贴，不扣达人）
+    order.settleVia = via || 'merchant'; // merchant | auto | timeout
+    credit(u, income, 'task_income', '任务结算 · ' + t.title.slice(0, 14) + '…（含平台服务费 ' + Math.round(CONFIG.platformFeeRate * 100) + '%）');
+    // 信用与完成率
+    u.doneCount = (u.doneCount || 0) + 1;
+    u.credit = Math.min(100, (u.credit === undefined ? 80 : u.credit) + 2);
+    if (rating) {
+      if (!u.ratings) u.ratings = [];
+      u.ratings.push({ by: t.merchantId, stars: Math.max(1, Math.min(5, Number(rating) || 5)), text: String(reviewText || '').slice(0, 100), at: Date.now() });
+      if (u.ratings.length > 100) u.ratings.shift();
+    }
+    // 邀请返佣：按达人实收的 10%（平台补贴，不扣达人）
     if (u.invitedBy) {
       var inviter = db.users.filter(function (x) { return x.id === u.invitedBy; })[0];
       if (inviter) {
-        var bonus = txr(paid * 0.1);
+        var bonus = txr(income * 0.1);
         if (bonus > 0) {
           credit(inviter, bonus, 'invite_bonus', '邀请返佣 · ' + u.display + ' 的任务收益');
           sendTo(inviter.id, { type: 'invite_bonus', amount: bonus, from: u.display });
+          pushMsg(inviter.id, 'invite_bonus', '邀请返佣到账 ¥' + bonus, u.display + ' 的任务结算已完成，返佣已进入你的余额。');
         }
       }
     }
     saveDB();
-    sendTo(u.id, { type: 'order_settled', paid: paid, title: t.title, orderId: order.id });
+    pushMsg(u.id, 'order_settled', '任务已验收结算 ¥' + income, '「' + t.title + '」商家已验收' + (via === 'timeout' ? '（超时自动通过）' : '') + '，实收 ¥' + income + '（平台服务费 ¥' + fee + '）已划入余额。');
+    sendTo(u.id, { type: 'order_settled', paid: income, title: t.title, orderId: order.id });
     sendTo(t.merchantId, { type: 'campaign_spend', title: t.title, paid: paid });
+    broadcast({ type: 'refresh' });
+  }
+  // 拒稿：商家验收不通过，达人可修改后重新提交
+  function rejectOrder(order, reason, byId) {
+    if (order.status !== 'review') return;
+    var t = db.tasks.filter(function (x) { return x.id === order.taskId; })[0];
+    order.status = 'rejected';
+    order.rejectReason = String(reason || '').slice(0, 200);
+    order.rejectedAt = Date.now();
+    var u = db.users.filter(function (x) { return x.id === order.userId; })[0];
+    if (u) {
+      u.rejectCount = (u.rejectCount || 0) + 1;
+      u.credit = Math.max(0, (u.credit === undefined ? 80 : u.credit) - 5);
+      pushMsg(u.id, 'order_rejected', '作品被退回修改', '「' + (t ? t.title : '') + '」商家给出了拒稿理由，请修改后重新提交。理由：' + order.rejectReason);
+    }
+    saveDB();
     broadcast({ type: 'refresh' });
   }
   function sweepReviewOrders() {
     var now = Date.now();
     var changed = false;
     db.orders.forEach(function (o) {
-      if (o.status === 'review' && o.settleAt && now >= o.settleAt) { settleOrder(o); changed = true; }
+      // 自动验收模式：提交后 settleAt 到点自动通过
+      if (o.status === 'review' && o.settleAt && now >= o.settleAt) { settleOrder(o, null, null, 'auto'); changed = true; return; }
+      // 人工验收：商家 72h 未处理自动通过，防卡单
+      if (o.status === 'review' && o.reviewDeadlineAt && now >= o.reviewDeadlineAt) { settleOrder(o, null, null, 'timeout'); changed = true; return; }
+      // 超时未交：任务截止后取消订单并释放名额
+      if (o.status === 'todo') {
+        var t = db.tasks.filter(function (x) { return x.id === o.taskId; })[0];
+        if (t && t.deadlineAt && now > t.deadlineAt) {
+          o.status = 'cancelled';
+          t.taken = Math.max(0, t.taken - 1);
+          pushMsg(o.userId, 'order_cancelled', '订单超时取消', '「' + t.title + '」已过截止时间仍未提交，名额已释放。');
+          changed = true;
+        }
+      }
     });
     // 定时发布到点自动上线
     db.contents.forEach(function (c) {
@@ -306,6 +419,7 @@
         c.status = 'published';
         changed = true;
         sendTo(c.userId, { type: 'content_published', title: c.title });
+        pushMsg(c.userId, 'content_published', '定时内容已上线', '「' + c.title + '」已到预定时间，自动发布完成。');
       }
     });
     if (changed) { saveDB(); broadcast({ type: 'refresh' }); }
@@ -511,6 +625,8 @@
     var user = {
       id: uid('u'), name: uname, display: uname, salt: salt, passHash: hashPassword(pwd, salt),
       role: role, balance: 0, totalEarn: 0, totalWithdraw: 0,
+      email: String(b.email || '').trim().slice(0, 60),
+      credit: 80, doneCount: 0, rejectCount: 0,
       checkins: {}, createdAt: Date.now(),
       inviteCode: 'GT-' + crypto.randomBytes(2).toString('hex').toUpperCase()
     };
@@ -538,6 +654,24 @@
     saveDB();
     json(ctx.res, 200, { token: token, user: publicUser(user) });
   });
+  // 修改密码（登录态）
+  route('POST', '/api/auth/password', function (ctx) {
+    var u = ctx.user;
+    var oldPwd = String(ctx.body.oldPassword || '');
+    var newPwd = String(ctx.body.newPassword || '');
+    if (hashPassword(oldPwd, u.salt) !== u.passHash) return json(ctx.res, 400, { error: '当前密码不正确' });
+    if (newPwd.length < 6) return json(ctx.res, 400, { error: '新密码至少 6 位' });
+    u.salt = crypto.randomBytes(8).toString('hex');
+    u.passHash = hashPassword(newPwd, u.salt);
+    // 改密后吊销其他会话
+    Object.keys(db.sessions).forEach(function (tk) {
+      if (db.sessions[tk].userId === u.id) delete db.sessions[tk];
+    });
+    var token = crypto.randomBytes(24).toString('hex');
+    db.sessions[token] = { userId: u.id, at: Date.now() };
+    saveDB();
+    json(ctx.res, 200, { token: token });
+  }, true);
   route('GET', '/api/auth/me', function (ctx) {
     json(ctx.res, 200, { user: ctx.user ? publicUser(ctx.user) : null });
   }, true);
@@ -547,6 +681,7 @@
     sweepReviewOrders();
     var q = ctx.query;
     var list = db.tasks.filter(function (t) {
+      if (t.banned) return false; // 运营下架的任务不进广场
       if (q.platform && q.platform !== 'all' && t.platform !== q.platform) return false;
       if (q.mode && q.mode !== 'all' && t.mode !== q.mode) return false;
       if (q.q) {
@@ -574,6 +709,14 @@
     var u = ctx.user, b = ctx.body;
     // 双角色平台：任何账号均可作为投放方发布任务，真实约束是余额与托管预算
     var platforms = Array.isArray(b.platforms) && b.platforms.length ? b.platforms : ['xhs'];
+    // 商家资质认证：发布投放前须完成（官方任务不受限）
+    if (!u.biz || u.biz.status !== 'verified') {
+      return json(ctx.res, 400, { error: '发布投放前请先完成商家资质认证（填写企业名称与执照号）', code: 'need_biz' });
+    }
+    // 敏感词校验（广告法合规第一道闸）
+    var hitWord = findSensitive([b.title, b.desc, b.reqs].join(' '));
+    if (hitWord) return json(ctx.res, 400, { error: '内容包含违规敏感词「' + hitWord + '」，请修改后重试', code: 'sensitive' });
+    var reviewMode = b.reviewMode === 'auto' ? 'auto' : 'manual';
     var reward = txr(Number(b.reward) || 0), capacity = Math.floor(Number(b.capacity) || 0);
     var days = Math.min(90, Math.max(1, Math.floor(Number(b.days) || 7)));
     if (!String(b.title || '').trim()) return json(ctx.res, 400, { error: '请填写任务名称' });
@@ -589,12 +732,17 @@
       id: uid('T'), title: String(b.title).trim(), platform: platforms[0], platforms: platforms, mode: b.mode || 'fixed',
       reward: reward, unit: { fixed: '每篇可赚', cpe: '每次互动', cpm: '千次播放', ladder: '每篇最高', milestone: '封顶可赚', per: '每次可赚' }[b.mode || 'fixed'],
       capacity: capacity, taken: 0, tags: ['新'], fanMin: Math.max(0, Math.floor(Number(b.fanMin) || 0)),
-      aiScore: rnd(80, 95), daysLeft: days, pubDaysAgo: 0, pubAt: Date.now(), cover: rnd(0, 5),
+      daysLeft: days, pubDaysAgo: 0, pubAt: Date.now(), cover: rnd(0, 5),
       merchant: u.display, merchantId: u.id, budget: budget, spend: 0, status: 'on', pinned: false, oneKey: false,
-      desc: String(b.desc || '').trim() || '商家暂未填写任务说明，可直接沟通确认创作方向。',
+      reviewMode: reviewMode, desc: String(b.desc || '').trim() || '商家暂未填写任务说明，可直接沟通确认创作方向。',
       reqs: reqs.length ? reqs : ['内容需为原创', '需带指定话题标签'],
-      steps: ['接受任务', '创作并发布内容', '回填作品链接', '审核通过自动结算']
+      steps: ['接受任务', '创作并发布内容', '回填作品链接', reviewMode === 'auto' ? '平台自动验收结算' : '商家验收后结算']
     };
+    // 匹配分为规则模型（非随机）：奖励力度 + 名额余量 + 紧急度 + 商家认证加成
+    var remainRatio = 1;
+    var urgency = t.daysLeft <= 3 ? 10 : (t.daysLeft <= 7 ? 6 : 2);
+    var intensity = Math.min(10, Math.round(t.reward / (t.mode === 'fixed' ? 20 : t.mode === 'per' ? 0.5 : 10)));
+    t.aiScore = Math.max(60, Math.min(99, 60 + Math.round(remainRatio * 15) + urgency + (u.biz && u.biz.status === 'verified' ? 8 : 0) + intensity));
     db.tasks.unshift(t);
     saveDB();
     broadcast({ type: 'refresh' });
@@ -637,7 +785,7 @@
     var u = ctx.user;
     var orders = db.orders.filter(function (o) { return o.userId === u.id; }).slice().reverse().map(function (o) {
       var t = db.tasks.filter(function (x) { return x.id === o.taskId; })[0] || {};
-      return Object.assign({}, o, { title: t.title, platform: t.platform, mode: t.mode, reward: t.reward });
+      return Object.assign({}, o, { title: t.title, platform: t.platform, mode: t.mode, reward: t.reward, reviewMode: t.reviewMode || 'auto', merchantId: t.merchantId });
     });
     json(ctx.res, 200, { orders: orders });
   }, true);
@@ -645,15 +793,91 @@
     var u = ctx.user;
     var order = db.orders.filter(function (o) { return o.id === ctx.params.id && o.userId === u.id; })[0];
     if (!order) return json(ctx.res, 404, { error: '订单不存在' });
-    if (order.status !== 'todo') return json(ctx.res, 400, { error: '当前状态不可提交' });
+    if (order.status !== 'todo' && order.status !== 'rejected') return json(ctx.res, 400, { error: '当前状态不可提交' });
+    var link = String(ctx.body.link || '').trim();
+    if (!/^https?:\/\/.+/.test(link)) return json(ctx.res, 400, { error: '请粘贴以 http(s):// 开头的作品链接' });
+    var t = db.tasks.filter(function (x) { return x.id === order.taskId; })[0];
+    if (t && t.deadlineAt && Date.now() > t.deadlineAt) return json(ctx.res, 400, { error: '任务已过截止时间' });
+    order.link = link;
+    order.status = 'review';
+    order.resubmitted = order.status === 'review' && order.rejectReason ? (order.resubmitted || 0) + 1 : (order.resubmitted || 0);
+    var manual = t && t.merchantId !== 'official' && t.reviewMode === 'manual';
+    if (manual) {
+      // 人工验收：等待商家在验收窗口内处理，超时自动通过
+      order.settleAt = null;
+      order.reviewDeadlineAt = Date.now() + CONFIG.reviewWindowHours * 3600000;
+      if (t.merchantId) pushMsg(t.merchantId, 'order_review', '有作品待验收', u.display + ' 已向「' + t.title + '」提交作品，请在 ' + CONFIG.reviewWindowHours + ' 小时内完成验收，超时将自动通过。');
+    } else {
+      // 自动验收模式：平台验收窗口（演示 5 秒）
+      order.settleAt = Date.now() + 5000;
+      order.reviewDeadlineAt = null;
+    }
+    saveDB();
+    broadcast({ type: 'refresh' });
+    json(ctx.res, 200, { order: order, mode: manual ? 'manual' : 'auto' });
+  }, true);
+
+  // ---- 商家验收 ----
+  function findReviewableOrder(ctx) {
+    var o = db.orders.filter(function (x) { return x.id === ctx.params.id; })[0];
+    if (!o) return { error: '订单不存在' };
+    var t = db.tasks.filter(function (x) { return x.id === o.taskId; })[0];
+    if (!t || (t.merchantId !== ctx.user.id && ctx.user.role !== 'merchant' && t.merchantId !== 'official'))
+      return { error: '只有任务发布方可以验收' };
+    if (o.status !== 'review') return { error: '该订单当前不在待验收状态' };
+    return { order: o, task: t };
+  }
+  route('POST', '/api/orders/:id/approve', function (ctx) {
+    var found = findReviewableOrder(ctx);
+    if (found.error) return json(ctx.res, 400, { error: found.error });
+    settleOrder(found.order, ctx.body.rating, ctx.body.reviewText, 'merchant');
+    json(ctx.res, 200, { order: found.order });
+  }, true);
+  route('POST', '/api/orders/:id/reject', function (ctx) {
+    var found = findReviewableOrder(ctx);
+    if (found.error) return json(ctx.res, 400, { error: found.error });
+    var reason = String(ctx.body.reason || '').trim();
+    if (reason.length < 5) return json(ctx.res, 400, { error: '请填写至少 5 个字的拒稿理由，便于达人修改' });
+    rejectOrder(found.order, reason);
+    json(ctx.res, 200, { order: found.order });
+  }, true);
+  // 达人重新提交被拒作品
+  route('POST', '/api/orders/:id/resubmit', function (ctx) {
+    var u = ctx.user;
+    var order = db.orders.filter(function (o) { return o.id === ctx.params.id && o.userId === u.id; })[0];
+    if (!order) return json(ctx.res, 404, { error: '订单不存在' });
+    if (order.status !== 'rejected') return json(ctx.res, 400, { error: '仅被拒稿的订单可以重新提交' });
+    if (order.resubmitCount >= 2) return json(ctx.res, 400, { error: '同一订单最多重提 2 次，如有异议请联系客服' });
     var link = String(ctx.body.link || '').trim();
     if (!/^https?:\/\/.+/.test(link)) return json(ctx.res, 400, { error: '请粘贴以 http(s):// 开头的作品链接' });
     order.link = link;
     order.status = 'review';
-    order.settleAt = Date.now() + 5000; // 平台审核窗口（演示 5 秒）
+    order.rejectReason = '';
+    order.resubmitCount = (order.resubmitCount || 0) + 1;
+    var t = db.tasks.filter(function (x) { return x.id === order.taskId; })[0];
+    if (t && t.merchantId !== 'official' && t.reviewMode === 'manual') {
+      order.reviewDeadlineAt = Date.now() + CONFIG.reviewWindowHours * 3600000;
+    } else {
+      order.settleAt = Date.now() + 5000;
+    }
     saveDB();
     broadcast({ type: 'refresh' });
     json(ctx.res, 200, { order: order });
+  }, true);
+  // 商家查看自己任务的验收队列
+  route('GET', '/api/campaigns/:id/orders', function (ctx) {
+    var u = ctx.user;
+    var t = db.tasks.filter(function (x) { return x.id === ctx.params.id && x.merchantId === u.id; })[0];
+    if (!t) return json(ctx.res, 404, { error: '任务不存在' });
+    var list = db.orders.filter(function (o) { return o.taskId === t.id; }).slice().reverse().map(function (o) {
+      var usr = db.users.filter(function (x) { return x.id === o.userId; })[0] || {};
+      return {
+        id: o.id, status: o.status, link: o.link, paid: o.paid, income: o.income,
+        rejectReason: o.rejectReason || '', acceptedAt: o.acceptedAt, settledAt: o.settledAt,
+        creator: { id: usr.id, name: usr.display, credit: usr.credit === undefined ? 80 : usr.credit, doneCount: usr.doneCount || 0 }
+      };
+    });
+    json(ctx.res, 200, { orders: list, task: { id: t.id, title: t.title, reviewMode: t.reviewMode } });
   }, true);
 
   // ---- 内容 ----
@@ -824,16 +1048,108 @@
   });
   route('POST', '/api/wallet/withdraw', function (ctx) {
     var u = ctx.user;
+    if (!u.kyc || u.kyc.status !== 'verified') return json(ctx.res, 400, { error: '请先完成实名认证后再发起提现', code: 'need_kyc' });
     var amount = txr(Number(ctx.body.amount) || 0);
     if (!(amount >= 10)) return json(ctx.res, 400, { error: '提现金额需满 ¥10' });
     if (amount > u.balance) return json(ctx.res, 400, { error: '余额不足' });
-    var w = { id: uid('W'), userId: u.id, amount: amount, status: 'pending', createdAt: Date.now() };
+    var w = { id: uid('W'), userId: u.id, amount: amount, account: String(ctx.body.account || '').slice(0, 60), status: 'pending', createdAt: Date.now() };
     db.withdrawals.push(w);
     debit(u, amount, 'withdraw', '提现申请（受理中）');
     u.totalWithdraw = txr((u.totalWithdraw || 0) + amount);
     saveDB();
+    pushMsg(u.id, 'withdraw_pending', '提现申请已受理', '¥' + w.amount.toFixed(2) + ' 提现申请进入打款队列，对应余额已冻结。');
     broadcast({ type: 'refresh' });
     json(ctx.res, 200, { withdrawal: w, balance: u.balance });
+  }, true);
+
+  // ---- 认证中心（实名 / 商家资质）----
+  route('POST', '/api/kyc', function (ctx) {
+    var u = ctx.user;
+    var realName = String(ctx.body.realName || '').trim();
+    var idTail = String(ctx.body.idTail || '').trim();
+    if (realName.length < 2) return json(ctx.res, 400, { error: '请填写真实姓名' });
+    if (!/^\d{4}$/.test(idTail)) return json(ctx.res, 400, { error: '请填写证件号后 4 位' });
+    u.kyc = { status: 'verified', realName: realName, idTail: idTail, at: Date.now() }; // 演示环境自动过审
+    saveDB();
+    pushMsg(u.id, 'kyc_ok', '实名认证已通过', '实名信息审核通过，现已支持提现出金。');
+    json(ctx.res, 200, { kyc: u.kyc });
+  }, true);
+  route('POST', '/api/biz', function (ctx) {
+    var u = ctx.user;
+    var bizName = String(ctx.body.bizName || '').trim();
+    var licenseNo = String(ctx.body.licenseNo || '').trim();
+    if (bizName.length < 2) return json(ctx.res, 400, { error: '请填写企业/品牌名称' });
+    if (licenseNo.length < 6) return json(ctx.res, 400, { error: '请填写有效的营业执照号或统一社会信用代码' });
+    u.biz = { status: 'verified', bizName: bizName, licenseNo: licenseNo, at: Date.now() }; // 演示环境自动过审
+    saveDB();
+    pushMsg(u.id, 'biz_ok', '商家资质认证已通过', '「' + bizName + '」资质审核通过，现在可以发布投放任务了。');
+    json(ctx.res, 200, { biz: u.biz });
+  }, true);
+
+  // ---- 站内消息 ----
+  route('GET', '/api/messages', function (ctx) {
+    var list = db.messages.filter(function (m) { return m.userId === ctx.user.id; }).slice().reverse();
+    json(ctx.res, 200, {
+      messages: list.slice(0, 50),
+      total: list.length,
+      unread: list.filter(function (m) { return !m.read; }).length
+    });
+  }, true);
+  route('POST', '/api/messages/:id/read', function (ctx) {
+    var m = db.messages.filter(function (x) { return x.id === ctx.params.id && x.userId === ctx.user.id; })[0];
+    if (m) { m.read = true; saveDB(); }
+    json(ctx.res, 200, { ok: true });
+  }, true);
+  route('POST', '/api/messages/read-all', function (ctx) {
+    db.messages.forEach(function (m) { if (m.userId === ctx.user.id) m.read = true; });
+    saveDB();
+    json(ctx.res, 200, { ok: true });
+  }, true);
+
+  // ---- 举报 ----
+  route('POST', '/api/reports', function (ctx) {
+    var u = ctx.user, b = ctx.body;
+    var targetType = ['task', 'content', 'user'].indexOf(b.targetType) >= 0 ? b.targetType : null;
+    if (!targetType) return json(ctx.res, 400, { error: '举报对象类型无效' });
+    var reason = String(b.reason || '').trim();
+    if (reason.length < 5) return json(ctx.res, 400, { error: '请填写至少 5 个字的举报理由' });
+    var r = { id: uid('rp'), reporterId: u.id, targetType: targetType, targetId: String(b.targetId || ''), reason: reason.slice(0, 200), status: 'open', at: Date.now() };
+    db.reports.push(r);
+    saveDB();
+    json(ctx.res, 200, { report: r });
+  }, true);
+
+  // ---- 达人主页 ----
+  route('GET', '/api/users/:id/profile', function (ctx) {
+    var u = db.users.filter(function (x) { return x.id === ctx.params.id; })[0];
+    if (!u) return json(ctx.res, 404, { error: '用户不存在' });
+    var ratings = (u.ratings || []).slice(-5).reverse();
+    var avg = (u.ratings || []).length
+      ? txr(u.ratings.reduce(function (s, r) { return s + r.stars; }, 0) / u.ratings.length)
+      : 0;
+    var done = u.doneCount || 0, rej = u.rejectCount || 0;
+    var contents = db.contents.filter(function (c) { return c.userId === u.id; }).slice(-6).reverse().map(function (c) {
+      return { id: c.id, title: c.title, thumb: (c.images && c.images[0]) || '', at: c.createdAt };
+    });
+    json(ctx.res, 200, {
+      id: u.id, name: u.display, role: u.role, credit: u.credit === undefined ? 80 : u.credit,
+      totalEarn: u.totalEarn || 0, doneCount: done, rejectCount: rej,
+      completionRate: (done + rej) > 0 ? Math.round(done / (done + rej) * 100) : 100,
+      avgStars: avg, ratings: ratings, contents: contents, joinedAt: u.createdAt,
+      kyc: !!u.kyc, biz: u.biz || null
+    });
+  });
+
+  // ---- 内容删除（仅本人）----
+  route('DELETE', '/api/contents/:id', function (ctx) {
+    var i = db.contents.findIndex ? -1 : -1;
+    for (var k = 0; k < db.contents.length; k++) {
+      if (db.contents[k].id === ctx.params.id && db.contents[k].userId === ctx.user.id) { i = k; break; }
+    }
+    if (i < 0) return json(ctx.res, 404, { error: '内容不存在或无权删除' });
+    db.contents.splice(i, 1);
+    saveDB();
+    json(ctx.res, 200, { ok: true });
   }, true);
 
   // ---- 商家看板 ----
@@ -867,12 +1183,11 @@
 
   // ---- 龙虎榜 ----
   route('GET', '/api/rank', function (ctx) {
-    var creators = db.users.filter(function (u) { return u.role === 'creator'; });
-    var list = creators.map(function (u) { return { name: u.display, amt: u.totalEarn || 0 }; });
-    // 官方种子榜（营造冷启动氛围，标注为演示数据）
-    [['星河拾光', 28460.5], ['无界漫游者', 23118], ['阿岚的镜头', 19987.6], ['快门手 Ken', 17422],
-     ['南方有风', 15876.3], ['宅宅测评室', 13240], ['山城小面加蛋', 11208.9], ['喵酱不加班', 9877.4]]
-      .forEach(function (s) { list.push({ name: s[0], amt: s[1], seed: true }); });
+    // 真实榜单：只统计平台真实用户的累计收益（不含任何示例数据）
+    var creators = db.users.filter(function (u) { return u.role === 'creator' && (u.totalEarn || 0) > 0; });
+    var list = creators.map(function (u) {
+      return { name: u.display, amt: u.totalEarn || 0, uid: u.id, credit: u.credit === undefined ? 80 : u.credit };
+    });
     list.sort(function (a, b) { return b.amt - a.amt; });
     var me = null;
     if (ctx.user) {
@@ -881,6 +1196,68 @@
       me = { rank: rank, amount: myAmt };
     }
     json(ctx.res, 200, { list: list.slice(0, 9), me: me });
+  });
+
+  // ---- 运营后台（x-admin-key 鉴权）----
+  function isAdmin(ctx) { return (ctx.req.headers['x-admin-key'] || '') === CONFIG.adminKey; }
+  route('GET', '/api/admin/overview', function (ctx) {
+    if (!isAdmin(ctx)) return json(ctx.res, 403, { error: '无权限' });
+    var openReports = db.reports.filter(function (r) { return r.status === 'open'; }).length;
+    json(ctx.res, 200, {
+      users: db.users.length,
+      creators: db.users.filter(function (u) { return u.role === 'creator'; }).length,
+      tasks: db.tasks.length,
+      orders: db.orders.length,
+      settledOrders: db.orders.filter(function (o) { return o.status === 'settled'; }).length,
+      platformRevenue: db.platformRevenue || 0,
+      escrow: db.escrow,
+      pendingWithdrawals: db.withdrawals.filter(function (w) { return w.status === 'pending'; }).length,
+      openReports: openReports,
+      bannedTasks: db.tasks.filter(function (t) { return t.banned; }).length
+    });
+  });
+  route('GET', '/api/admin/reports', function (ctx) {
+    if (!isAdmin(ctx)) return json(ctx.res, 403, { error: '无权限' });
+    var list = db.reports.slice().reverse().map(function (r) {
+      var reporter = db.users.filter(function (u) { return u.id === r.reporterId; })[0];
+      return Object.assign({}, r, { reporter: reporter ? reporter.display : '未知' });
+    });
+    json(ctx.res, 200, { reports: list });
+  });
+  route('POST', '/api/admin/reports/:id/resolve', function (ctx) {
+    if (!isAdmin(ctx)) return json(ctx.res, 403, { error: '无权限' });
+    var r = db.reports.filter(function (x) { return x.id === ctx.params.id; })[0];
+    if (!r) return json(ctx.res, 404, { error: '举报单不存在' });
+    r.status = 'resolved';
+    r.result = String(ctx.body.result || '已核实处理').slice(0, 200);
+    r.resolvedAt = Date.now();
+    saveDB();
+    pushMsg(r.reporterId, 'report_resolved', '你的举报已处理', '处理结果：' + r.result);
+    json(ctx.res, 200, { report: r });
+  });
+  // 运营下架/恢复任务（广告合规）
+  route('POST', '/api/admin/tasks/:id/ban', function (ctx) {
+    if (!isAdmin(ctx)) return json(ctx.res, 403, { error: '无权限' });
+    var t = db.tasks.filter(function (x) { return x.id === ctx.params.id; })[0];
+    if (!t) return json(ctx.res, 404, { error: '任务不存在' });
+    t.banned = !t.banned;
+    if (t.banned) t.status = 'off';
+    saveDB();
+    broadcast({ type: 'refresh' });
+    json(ctx.res, 200, { task: { id: t.id, banned: t.banned, status: t.status } });
+  });
+  // 敏感词库管理
+  route('GET', '/api/admin/sensitive', function (ctx) {
+    if (!isAdmin(ctx)) return json(ctx.res, 403, { error: '无权限' });
+    json(ctx.res, 200, { words: db.sensitiveWords });
+  });
+  route('POST', '/api/admin/sensitive', function (ctx) {
+    if (!isAdmin(ctx)) return json(ctx.res, 403, { error: '无权限' });
+    var word = String(ctx.body.word || '').trim();
+    if (!word) return json(ctx.res, 400, { error: '词语不能为空' });
+    if (db.sensitiveWords.indexOf(word) < 0) db.sensitiveWords.push(word);
+    saveDB();
+    json(ctx.res, 200, { words: db.sensitiveWords });
   });
 
   // ---- 管理（运营用，ADMIN_KEY 鉴权）----
@@ -934,6 +1311,12 @@
     if (pathname.indexOf('/api/') === 0) {
       var m = matchRoute(req.method, pathname);
       if (!m) return json(res, 404, { error: '接口不存在' });
+      var ip = req.socket.remoteAddress || 'unknown';
+      var category = pathname.indexOf('/api/auth/') === 0 ? 'auth' : (req.method === 'GET' ? 'read' : 'write');
+      if (!allowRate(category, ip)) {
+        res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: '操作过于频繁，请稍后再试' }));
+      }
       Promise.all([readBody(req)]).then(function (results) {
         var user = getUserByToken(req);
         if (m.def.needUser && !user) return json(res, 401, { error: '请先登录' });
