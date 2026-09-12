@@ -1123,7 +1123,7 @@
         '<div class="card" style="max-width:420px;margin:40px auto">' +
         '<div class="field"><label>运营密钥（Admin Key）</label><input class="input" id="admKey" type="password" placeholder="与服务端 ADMIN_KEY 一致"></div>' +
         '<button class="btn btn-primary btn-block" data-action="admin-login">进入后台</button>' +
-        '<p style="font-size:12px;color:var(--muted);margin-top:10px">演示默认密钥：gt-admin-demo（可在服务端环境变量 ADMIN_KEY 修改）</p></div>';
+        '<p style="font-size:12px;color:var(--muted);margin-top:10px">密钥由服务端配置（ADMIN_KEY 环境变量或本机 config.local.json），代码仓库不保存任何真实密钥。</p></div>';
     }
     var a = C.admin;
     if (!a) return '<div class="loading-wrap"><div class="spinner"></div><p>加载运营数据…</p></div>';

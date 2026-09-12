@@ -12,3 +12,6 @@ Thumbs.db
 scripts/autostart-task.xml
 scripts/*.body
 scripts/*.final
+
+# 本机私有配置（密钥等，严禁入库）
+config.local.json

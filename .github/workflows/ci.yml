@@ -17,7 +17,9 @@ jobs:
         with:
           node-version: 20
 
-      - name: 启动服务（全新数据库）
+      - name: 启动服务（全新数据库 + 测试密钥）
+        env:
+          ADMIN_KEY: ci-test-admin-key
         run: |
           node server.js &
           for i in $(seq 1 20); do
@@ -26,6 +28,8 @@ jobs:
           done
 
       - name: 运行 40 项 API 集成测试
+        env:
+          ADMIN_KEY: ci-test-admin-key
         run: node tests/api-test.mjs
 
       - name: 语法检查前端脚本

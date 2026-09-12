@@ -80,7 +80,7 @@ node server.js
 - `GET  /api/admin/withdrawals` —— 提现申请列表
 - `POST /api/admin/withdrawals/:id/settle` —— 标记打款完成
 
-`ADMIN_KEY` 默认 `gt-admin-demo`，可用环境变量覆盖。**上线经营真实资金业务需具备相应企业资质（ICP 备案、支付商户签约等）**，代码侧已把接入点全部预留好。
+`ADMIN_KEY` **仓库中不保存任何真实密钥**：服务端按优先级读取环境变量 `ADMIN_KEY` → 本机 `config.local.json`（已被 .gitignore 排除）→ 均未配置时运营后台自动禁用。生成强密钥：`node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"`。**上线经营真实资金业务需具备相应企业资质（ICP 备案、支付商户签约等）**，代码侧已把接入点全部预留好。
 
 ## REST API 一览
 

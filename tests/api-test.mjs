@@ -4,6 +4,14 @@
          敏感词/限流/改密码/达人主页/内容删除/提现审批
    ============================================================ */
 var BASE = process.env.TEST_BASE || 'http://localhost:8642';
+// 运营密钥与服务端同源：环境变量优先，其次本机 config.local.json
+import { readFileSync } from 'node:fs';
+var ADMIN_KEY = process.env.ADMIN_KEY || '';
+if (!ADMIN_KEY) {
+  try {
+    ADMIN_KEY = JSON.parse(readFileSync(new URL('../config.local.json', import.meta.url), 'utf8')).ADMIN_KEY || '';
+  } catch (e) { /* 无本地配置 */ }
+}
 var passed = 0, failed = 0;
 
 function ok(cond, name, extra) {
@@ -133,9 +141,9 @@ var suffix = Date.now().toString(36).slice(-4);
   ok(wd.status === 200, '实名后提现受理');
   var wdBad = await req('POST', '/api/wallet/withdraw', { amount: 99999, account: 'a@b.c' }, at);
   ok(wdBad.status === 400, '余额不足提现被拒');
-  var wl = (await req('GET', '/api/admin/withdrawals', null, null, { 'x-admin-key': 'gt-admin-demo' })).data.withdrawals;
+  var wl = (await req('GET', '/api/admin/withdrawals', null, null, { 'x-admin-key': ADMIN_KEY })).data.withdrawals;
   ok(Array.isArray(wl) && wl.length >= 1, '运营可查提现单');
-  var res3 = await fetch(BASE + '/api/admin/withdrawals/' + wl[wl.length - 1].id + '/settle', { method: 'POST', headers: { 'x-admin-key': 'gt-admin-demo' } });
+  var res3 = await fetch(BASE + '/api/admin/withdrawals/' + wl[wl.length - 1].id + '/settle', { method: 'POST', headers: { 'x-admin-key': ADMIN_KEY } });
   ok((await res3.json()).withdrawal.status === 'paid', '运营标记打款完成');
 
   console.log('— 举报与运营处理 —');
@@ -143,24 +151,24 @@ var suffix = Date.now().toString(36).slice(-4);
   ok(rp.status === 200 && rp.data.report.status === 'open', '举报提交成功');
   var rpBad = await req('POST', '/api/reports', { targetType: 'task', targetId: 'x', reason: '短' }, bt);
   ok(rpBad.status === 400, '举报理由过短被拒');
-  var rpList = (await req('GET', '/api/admin/reports', null, null, { 'x-admin-key': 'gt-admin-demo' })).data.reports;
+  var rpList = (await req('GET', '/api/admin/reports', null, null, { 'x-admin-key': ADMIN_KEY })).data.reports;
   ok(rpList.length >= 1 && rpList[0].reporter, '运营可查举报单(含举报人)');
-  var rs = await req('POST', '/api/admin/reports/' + rp.data.report.id + '/resolve', { result: '已要求商家修改描述' }, null, { 'x-admin-key': 'gt-admin-demo' });
+  var rs = await req('POST', '/api/admin/reports/' + rp.data.report.id + '/resolve', { result: '已要求商家修改描述' }, null, { 'x-admin-key': ADMIN_KEY });
   ok(rs.status === 200 && rs.data.report.status === 'resolved', '运营处理举报');
   var msgR = (await req('GET', '/api/messages', null, bt)).data;
   ok(msgR.messages.some(function (m) { return m.type === 'report_resolved'; }), '举报人收到处理结果消息');
 
   console.log('— 运营后台 —');
-  var ov = (await req('GET', '/api/admin/overview', null, null, { 'x-admin-key': 'gt-admin-demo' })).data;
+  var ov = (await req('GET', '/api/admin/overview', null, null, { 'x-admin-key': ADMIN_KEY })).data;
   ok(ov.platformRevenue > 0, '平台服务费收入入账', ov.platformRevenue);
   ok(ov.escrow > 0, '托管池余额可见', ov.escrow);
   var ovNo = await req('GET', '/api/admin/overview');
   ok(ovNo.status === 403, '无密钥访问运营接口被拒');
-  var ban = await req('POST', '/api/admin/tasks/' + createdManual.data.task.id + '/ban', null, null, { 'x-admin-key': 'gt-admin-demo' });
+  var ban = await req('POST', '/api/admin/tasks/' + createdManual.data.task.id + '/ban', null, null, { 'x-admin-key': ADMIN_KEY });
   ok(ban.status === 200 && ban.data.task.banned === true, '运营下架任务');
   var listAfter = (await req('GET', '/api/tasks')).data.tasks;
   ok(!listAfter.some(function (t) { return t.id === createdManual.data.task.id; }), '下架任务不再出现在广场');
-  var sen = await req('POST', '/api/admin/sensitive', { word: '测试违禁词' }, null, { 'x-admin-key': 'gt-admin-demo' });
+  var sen = await req('POST', '/api/admin/sensitive', { word: '测试违禁词' }, null, { 'x-admin-key': ADMIN_KEY });
   ok(sen.status === 200 && sen.data.words.indexOf('测试违禁词') >= 0, '敏感词库可增补');
 
   console.log('— 内容删除与改密码 —');

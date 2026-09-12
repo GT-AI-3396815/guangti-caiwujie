@@ -15,7 +15,10 @@
   /* ---------------- 配置 ---------------- */
   var CONFIG = {
     port: Number(process.env.PORT) || 8642,
-    adminKey: process.env.ADMIN_KEY || 'gt-admin-demo',
+    // 运营密钥解析优先级：环境变量 > 本机私有配置(config.local.json，不入库) > 未配置(后台禁用)
+    // 安全策略：代码仓库不保存任何真实密钥；未配置密钥时 /api/admin/* 一律拒绝
+    adminKey: null,
+    adminKeySource: 'unset',
     // 新用户开业资金（平台账本授予，便于演示真实资金流）
     grants: { merchant: 8888, creator: 8 },
     // 平台服务费：达人任务结算收入中平台抽成比例（商业模式科目）
@@ -40,6 +43,28 @@
   var ROOT = __dirname;
   var DATA_DIR = path.join(ROOT, 'data');
   var DB_FILE = path.join(DATA_DIR, 'db.json');
+
+  // 运营密钥装载：环境变量优先，其次本机私有配置文件；都不存在则后台保持禁用
+  function loadAdminKey() {
+    if (process.env.ADMIN_KEY) {
+      CONFIG.adminKey = process.env.ADMIN_KEY;
+      CONFIG.adminKeySource = 'env';
+      return;
+    }
+    try {
+      var cfgPath = path.join(ROOT, 'config.local.json');
+      if (fs.existsSync(cfgPath)) {
+        var local = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        if (local.ADMIN_KEY) {
+          CONFIG.adminKey = String(local.ADMIN_KEY);
+          CONFIG.adminKeySource = 'local';
+          return;
+        }
+      }
+    } catch (e) { /* 配置文件损坏视为未配置 */ }
+    CONFIG.adminKey = null;
+    CONFIG.adminKeySource = 'unset';
+  }
 
   /* ---------------- 小工具 ---------------- */
   function uid(p) { return p + '_' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex'); }
@@ -1198,10 +1223,13 @@
     json(ctx.res, 200, { list: list.slice(0, 9), me: me });
   });
 
-  // ---- 运营后台（x-admin-key 鉴权）----
-  function isAdmin(ctx) { return (ctx.req.headers['x-admin-key'] || '') === CONFIG.adminKey; }
+  // ---- 运营后台（x-admin-key 鉴权；未配置密钥时禁用）----
+  function isAdmin(ctx) {
+    if (!CONFIG.adminKey) return false; // 未配置密钥 → 后台功能禁用（防默认密钥风险）
+    return (ctx.req.headers['x-admin-key'] || '') === CONFIG.adminKey;
+  }
   route('GET', '/api/admin/overview', function (ctx) {
-    if (!isAdmin(ctx)) return json(ctx.res, 403, { error: '无权限' });
+    if (!isAdmin(ctx)) return json(ctx.res, 403, { error: CONFIG.adminKey ? '密钥错误' : '运营密钥未配置，后台已禁用（服务端设置 ADMIN_KEY 环境变量或 config.local.json）' });
     var openReports = db.reports.filter(function (r) { return r.status === 'open'; }).length;
     json(ctx.res, 200, {
       users: db.users.length,
@@ -1330,11 +1358,17 @@
     serveStatic(req, res, pathname);
   });
 
+  loadAdminKey();
   loadDB();
   normalizeTasks();
   sweepReviewOrders();
   setInterval(sweepReviewOrders, 30000); // 周期清理：审核结算 / 定时发布 / 截止递减
   server.listen(CONFIG.port, function () {
     console.log('光体•财无界 服务已启动: http://localhost:' + CONFIG.port);
+    if (CONFIG.adminKey) {
+      console.log('[安全] 运营后台已启用（密钥来源: ' + CONFIG.adminKeySource + '）');
+    } else {
+      console.warn('[安全][警告] 未配置运营密钥（ADMIN_KEY 环境变量或 config.local.json），运营后台已禁用。');
+    }
   });
 })();
