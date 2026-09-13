@@ -41,7 +41,7 @@
   };
 
   var ROOT = __dirname;
-  var DATA_DIR = path.join(ROOT, 'data');
+  var DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(ROOT, 'data');
   var DB_FILE = path.join(DATA_DIR, 'db.json');
 
   // 运营密钥装载：环境变量优先，其次本机私有配置文件；都不存在则后台保持禁用
@@ -212,13 +212,14 @@
          steps: ['预约观展', '拍摄并发布', '回填链接', '按阶梯结算'] })
     ];
   }
+  var PLATFORM_KEYS = ['xhs', 'dy', 'sph', 'bili', 'wb', 'ks'];
   var INTERACT_DEFS = [
-    { id: 'I1', title: '为指定笔记点赞 + 收藏', type: '点赞收藏', icon: 'i-heart', reward: 0.3, daily: 20, desc: '在互动列表打开指定笔记，完成点赞与收藏' },
-    { id: 'I2', title: '关注品牌企业号', type: '关注任务', icon: 'i-users', reward: 0.5, daily: 10, desc: '关注指定企业号并保留 7 天' },
-    { id: 'I3', title: '撰写 15 字以上优质评论', type: '评论任务', icon: 'i-book', reward: 0.8, daily: 10, desc: '评论需与内容相关，拒绝复制粘贴' },
-    { id: 'I4', title: '转发指定微博并带话题', type: '转发任务', icon: 'i-send', reward: 0.4, daily: 15, desc: '转发需携带指定话题标签' },
-    { id: 'I5', title: 'B 站视频一键三连', type: '三连任务', icon: 'i-bolt', reward: 0.5, daily: 20, desc: '对指定视频点赞、投币、收藏' },
-    { id: 'I6', title: '观看直播间满 1 分钟', type: '观看任务', icon: 'i-clock', reward: 1.2, daily: 5, desc: '进入指定直播间停留满 60 秒' }
+    { id: 'I1', title: '为指定笔记点赞 + 收藏', type: '点赞收藏', icon: 'i-heart', reward: 0.3, daily: 20, desc: '在互动列表打开指定笔记，完成点赞与收藏', target: 'https://xhs.demo/note/interact-001' },
+    { id: 'I2', title: '关注品牌企业号', type: '关注任务', icon: 'i-users', reward: 0.5, daily: 10, desc: '关注指定企业号并保留 7 天', target: 'https://xhs.demo/user/guangti-official' },
+    { id: 'I3', title: '撰写 15 字以上优质评论', type: '评论任务', icon: 'i-book', reward: 0.8, daily: 10, desc: '评论需与内容相关，拒绝复制粘贴', target: 'https://xhs.demo/note/interact-003' },
+    { id: 'I4', title: '转发指定微博并带话题', type: '转发任务', icon: 'i-send', reward: 0.4, daily: 15, desc: '转发需携带指定话题标签', target: 'https://weibo.demo/status/guangti-004' },
+    { id: 'I5', title: 'B 站视频一键三连', type: '三连任务', icon: 'i-bolt', reward: 0.5, daily: 20, desc: '对指定视频点赞、投币、收藏', target: 'https://bili.demo/video/interact-005' },
+    { id: 'I6', title: '观看直播间满 1 分钟', type: '观看任务', icon: 'i-clock', reward: 1.2, daily: 5, desc: '进入指定直播间停留满 60 秒', target: 'https://live.demo/room/guangti-006' }
   ];
   function seedDB() {
     var tasks = seedTasks();
@@ -445,6 +446,34 @@
         changed = true;
         sendTo(c.userId, { type: 'content_published', title: c.title });
         pushMsg(c.userId, 'content_published', '定时内容已上线', '「' + c.title + '」已到预定时间，自动发布完成。');
+      }
+    });
+    // 到期任务：自动关单，未消耗的托管预算退还商家（官方任务预算属平台，仅关单）
+    db.tasks.forEach(function (t) {
+      if (t.deadlineAt && !t.closed && now > t.deadlineAt + 60000) {
+        t.closed = true;
+        t.status = 'off';
+        changed = true;
+        var remaining = txr(taskBudget(t) - (t.spend || 0));
+        if (remaining > 0 && t.merchantId !== 'official') {
+          var mu = db.users.filter(function (x) { return x.id === t.merchantId; })[0];
+          if (mu) {
+            db.escrow = txr(db.escrow - remaining);
+            credit(mu, remaining, 'unfreeze', '任务到期 · 未消耗托管预算退回「' + t.title.slice(0, 12) + '」');
+            pushMsg(mu.id, 'budget_refund', '到期任务预算已退回', '「' + t.title + '」已结束，未消耗托管预算 ¥' + remaining.toFixed(2) + ' 退回余额。');
+          }
+        }
+      }
+    });
+    // 内容数据自然增长（模拟真实平台的传播曲线，10 分钟一跳）
+    db.contents.forEach(function (c) {
+      if (!c.growthAt) c.growthAt = c.createdAt;
+      if (now - c.growthAt >= 600000) {
+        c.growthAt = now;
+        c.stats.views += rnd(5, 40);
+        c.stats.likes += rnd(0, 6);
+        if (Math.random() > 0.7) c.stats.comments += rnd(0, 2);
+        changed = true;
       }
     });
     if (changed) { saveDB(); broadcast({ type: 'refresh' }); }
@@ -788,6 +817,40 @@
     json(ctx.res, 200, { task: t });
   }, true);
 
+  // ---- 账号报备（社交账号绑定，接单粉丝门槛依据）----
+  route('GET', '/api/accounts/mine', function (ctx) {
+    json(ctx.res, 200, { accounts: ctx.user.accounts || [] });
+  }, true);
+  route('POST', '/api/accounts', function (ctx) {
+    var u = ctx.user, b = ctx.body;
+    var platform = PLATFORM_KEYS.indexOf(b.platform) >= 0 ? b.platform : null;
+    var followers = Math.max(0, Math.floor(Number(b.followers) || 0));
+    var handle = String(b.handle || '').trim().slice(0, 40);
+    if (!platform) return json(ctx.res, 400, { error: '平台无效' });
+    if (!handle) return json(ctx.res, 400, { error: '请填写账号昵称或主页链接' });
+    if (followers > 50000000) return json(ctx.res, 400, { error: '粉丝数超出可填报范围' });
+    u.accounts = u.accounts || [];
+    if (u.accounts.length >= 6) return json(ctx.res, 400, { error: '最多报备 6 个账号' });
+    var exist = u.accounts.filter(function (a) { return a.platform === platform; })[0];
+    if (exist) {
+      exist.handle = handle;
+      exist.followers = followers;
+      exist.updatedAt = Date.now();
+    } else {
+      u.accounts.push({ platform: platform, handle: handle, followers: followers, addedAt: Date.now() });
+    }
+    saveDB();
+    json(ctx.res, 200, { accounts: u.accounts });
+  }, true);
+  route('POST', '/api/accounts/remove', function (ctx) {
+    var u = ctx.user;
+    u.accounts = (u.accounts || []).filter(function (a) {
+      return !(a.platform === ctx.body.platform && a.handle === ctx.body.handle);
+    });
+    saveDB();
+    json(ctx.res, 200, { accounts: u.accounts });
+  }, true);
+
   // ---- 订单 ----
   route('POST', '/api/orders', function (ctx) {
     var u = ctx.user;
@@ -798,10 +861,23 @@
     if (t.taken >= t.capacity) return json(ctx.res, 400, { error: '来晚一步，名额已被抢光' });
     if (db.orders.some(function (o) { return o.userId === u.id && o.taskId === t.id && o.status !== 'settled'; }))
       return json(ctx.res, 400, { error: '你已接受过该任务' });
+    // 粉丝门槛：依据报备账号中该平台的最高粉丝数
+    if (t.fanMin > 0) {
+      var accounts = u.accounts || [];
+      var best = 0;
+      accounts.forEach(function (a) { if (a.followers > best) best = a.followers; });
+      if (best < t.fanMin) {
+        return json(ctx.res, 400, {
+          error: '该任务要求粉丝 ≥ ' + t.fanMin + '，你报备账号的最高粉丝为 ' + best + '。请先在「认证中心 → 账号报备」绑定社交账号',
+          code: 'need_account'
+        });
+      }
+    }
     var order = { id: uid('o'), taskId: t.id, userId: u.id, acceptedAt: Date.now(), status: 'todo', link: '', paid: 0 };
     db.orders.push(order);
     t.taken++;
     saveDB();
+    pushMsg(u.id, 'order_accepted', '接单成功', '「' + t.title + '」请在 ' + t.daysLeft + ' 天内完成创作并回填作品链接，截止后未交将释放名额。');
     broadcast({ type: 'refresh' });
     json(ctx.res, 200, { order: order });
   }, true);
@@ -1202,7 +1278,10 @@
   }, true);
   route('GET', '/api/campaigns/mine', function (ctx) {
     var u = ctx.user;
-    var mine = db.tasks.filter(function (t) { return t.merchantId === u.id; }).slice().reverse();
+    var mine = db.tasks.filter(function (t) { return t.merchantId === u.id; }).slice().reverse().map(function (t) {
+      var pending = db.orders.filter(function (o) { return o.taskId === t.id && o.status === 'review'; }).length;
+      return Object.assign({}, t, { pendingReview: pending });
+    });
     json(ctx.res, 200, { campaigns: mine });
   }, true);
 
@@ -1350,7 +1429,13 @@
         if (m.def.needUser && !user) return json(res, 401, { error: '请先登录' });
         var query = {};
         u.searchParams.forEach(function (v, k) { query[k] = v; });
-        m.def.handler({ req: req, res: res, body: results[0], user: user, params: m.params, query: query });
+        try {
+          m.def.handler({ req: req, res: res, body: results[0], user: user, params: m.params, query: query });
+        } catch (e) {
+          // 兜底：处理器异常不能击穿服务进程
+          console.error('[api] handler error:', pathname, e.message);
+          if (!res.headersSent) json(res, 500, { error: '服务内部错误，请稍后重试' });
+        }
       });
       return;
     }

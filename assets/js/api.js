@@ -79,6 +79,11 @@
     kyc: function (realName, idTail) { return request('POST', '/api/kyc', { realName: realName, idTail: idTail }); },
     biz: function (bizName, licenseNo) { return request('POST', '/api/biz', { bizName: bizName, licenseNo: licenseNo }); },
 
+    // 账号报备
+    accountsMine: function () { return request('GET', '/api/accounts/mine'); },
+    addAccount: function (platform, handle, followers) { return request('POST', '/api/accounts', { platform: platform, handle: handle, followers: followers }); },
+    removeAccount: function (platform, handle) { return request('POST', '/api/accounts/remove', { platform: platform, handle: handle }); },
+
     // 账号
     changePassword: function (oldPassword, newPassword) { return request('POST', '/api/auth/password', { oldPassword: oldPassword, newPassword: newPassword }); },
 

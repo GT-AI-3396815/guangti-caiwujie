@@ -113,6 +113,7 @@
     if (e && e.status === 401) { toast('请先登录后再操作', 'warn'); openAuth('login'); return; }
     if (e && e.code === 'need_biz') { toast(e.message, 'warn'); location.hash = '#/kyc'; return; }
     if (e && e.code === 'need_kyc') { toast(e.message, 'warn'); location.hash = '#/kyc'; return; }
+    if (e && e.code === 'need_account') { toast(e.message, 'warn'); location.hash = '#/kyc'; return; }
     var msg = (e && e.message) || '操作失败，请重试';
     if (e && e.message && e.message.indexOf('Failed to fetch') >= 0) msg = '网络连接失败，请确认服务已启动';
     toast(msg, 'err');
@@ -169,6 +170,7 @@
         break;
       case 'kyc':
         jobs.push(Api.me().then(function (r) { C.me = r.user; }));
+        jobs.push(Api.accountsMine().then(function (r) { C.accounts = r.accounts; }));
         break;
       case 'profile':
         jobs.push(Api.userProfile(S.profileId).then(function (r) { C.profile = r; }).catch(function (e) { C.profile = null; }));
@@ -269,6 +271,9 @@
     }).join('');
     $('#mainNav').innerHTML = html;
     $('#mobileNav').innerHTML = html;
+    // 商家端无任务广场，隐藏搜索框避免无效交互
+    var sb = $('#searchBox');
+    if (sb) sb.style.display = (S.role === 'merchant') ? 'none' : '';
     $all('#roleSwitch .role-btn').forEach(function (b) {
       b.classList.toggle('active', b.getAttribute('data-role') === S.role);
     });
@@ -353,6 +358,18 @@
       .map(function (o) { return '<option value="' + o[0] + '"' + (f.sort === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('');
 
     return '' +
+      (C.me && !localStorage.getItem('gt_guide_done')
+        ? '<section class="hero" style="padding:18px 24px;margin-bottom:16px">' +
+          '<div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">' +
+          '<span class="badge b-gold" style="margin-top:3px">新手引导</span>' +
+          '<div style="flex:1;min-width:260px;font-size:13.5px;color:var(--text2);line-height:1.9">' +
+          '<b style="color:var(--text)">三步赚到第一笔：</b>① 在' +
+          '<a href="#/kyc" data-action="nav" data-route="kyc" style="color:var(--gold)">认证中心</a>完成实名并报备社交账号（粉丝数决定能接哪些任务）→ ' +
+          '② 在下方广场挑选任务点「接受任务」→ ③ 创作发布后回填链接，验收通过自动到账。' +
+          '打卡和互动大厅不设门槛，注册当天就能有收益。</div>' +
+          '<button class="btn btn-ghost btn-sm" data-action="guide-dismiss">知道了</button>' +
+          '</div></section>'
+        : '') +
       '<section class="hero">' +
         '<h2>让每一次创作，<span class="grad-text">都有回响</span></h2>' +
         '<p>光体•财无界聚合全网优质投放任务，AI 智能匹配你的账号赛道，接单、发布、结算一站直达，收益透明、到账可查。</p>' +
@@ -610,7 +627,10 @@
       else btn = '<button class="btn btn-primary btn-sm" data-action="interact-do" data-id="' + d.id + '">去完成</button>';
       return '<div class="interact-row">' +
         '<span class="interact-ico">' + icon(d.icon, 'ic-lg') + '</span>' +
-        '<div class="interact-main"><h4>' + esc(d.title) + '</h4><p>' + esc(d.desc) + ' · 今日剩余 ' + left + ' 次</p></div>' +
+        '<div class="interact-main"><h4>' + esc(d.title) + '</h4>' +
+        '<p>' + esc(d.desc) + ' · 今日剩余 ' + left + ' 次</p>' +
+        (d.target ? '<p><a href="' + esc(d.target) + '" target="_blank" rel="noopener" style="color:var(--cyan)">' + icon('i-link', 'ic-sm') + ' 打开目标内容 ↗</a></p>' : '') +
+        '</div>' +
         '<span class="interact-reward">¥' + money(d.reward) + '<small>/次</small></span>' + btn + '</div>';
     }).join('');
     return '<div class="page-head"><h1>' + icon('i-heart') + '互动大厅</h1><div class="sub">轻量互动任务，随做随结 · 今日已完成 ' + doneTotal + ' 次</div></div>' +
@@ -867,6 +887,19 @@
     return '<div class="page-head"><h1>' + icon('i-book') + '帮助中心</h1><div class="sub">三分钟上手光体•财无界，常见问题一站解决</div></div>' +
       '<div class="split"><div>' +
         '<div class="card"><div class="card-title">' + icon('i-rocket') + '新手指南</div>' + guides + '</div>' +
+        '<h3 style="margin:22px 0 12px;font-size:16px">平台规则速览</h3>' +
+        '<div class="card"><div class="card-title">' + icon('i-coin') + '费率与结算</div><ul style="list-style:none;display:flex;flex-direction:column;gap:8px;font-size:13.5px;color:var(--text2)">' +
+          '<li>· 任务结算收取 <b class="grad-text">10% 平台服务费</b>，达人实收 = 结算额 × 90%</li>' +
+          '<li>· 固定价任务按篇结算；互动/曝光类按有效数据折算，均以任务剩余托管预算封顶</li>' +
+          '<li>· 人工验收任务，商家须在 <b>72 小时</b>内验收，超时自动通过结算</li>' +
+          '<li>· 被拒稿可修改重提，同一订单最多 <b>2 次</b>；重提后重新计时 72 小时</li>' +
+        '</ul></div>' +
+        '<div class="card" style="margin-top:12px"><div class="card-title">' + icon('i-trophy') + '信用分与粉丝门槛</div><ul style="list-style:none;display:flex;flex-direction:column;gap:8px;font-size:13.5px;color:var(--text2)">' +
+          '<li>· 新用户信用分 <b>80</b>：验收通过 +2（上限 100），拒稿 −5（下限 0）</li>' +
+          '<li>· 接取带粉丝门槛的任务，需先在<a href="#/kyc" data-action="nav" data-route="kyc" style="color:var(--gold)">认证中心</a>报备社交账号，取各平台最高粉丝数判定</li>' +
+          '<li>· 任务截止未提交，订单自动取消并释放名额</li>' +
+          '<li>· 提现需完成实名认证，满 ¥10 起，运营打款后显示「已打款」</li>' +
+        '</ul></div>' +
         '<h3 style="margin:22px 0 12px;font-size:16px">常见问题</h3>' + faqs +
       '</div>' +
       '<div><div class="card" style="text-align:center;padding:30px 20px">' +
@@ -891,6 +924,15 @@
         '<div class="stat-card"><div class="num">¥' + money(d.spend) + '</div><div class="lab">' + icon('i-coin') + '累计消耗</div></div>' +
       '</div>' +
       '<div class="card"><div class="card-title">' + icon('i-chart') + '近 7 日消耗趋势</div><canvas class="chart" id="dashChart"></canvas></div>' +
+      '<div class="card" style="margin-top:16px"><div class="card-title">' + icon('i-chart') + '投放健康度</div>' +
+        '<div class="stat-strip" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">' +
+        '<div class="stat-card"><div class="num">' + (d.orders > 0 ? Math.round(d.settled / d.orders * 100) : 0) + '%</div><div class="lab">验收通过率</div></div>' +
+        '<div class="stat-card"><div class="num">' + C.campaigns.reduce(function (s, c) { return s + (c.pendingReview || 0); }, 0) + '</div><div class="lab">待验收作品</div></div>' +
+        '<div class="stat-card"><div class="num">' + (function () {
+          var totalBudget = C.campaigns.reduce(function (s, c) { return s + (c.budget || 0); }, 0);
+          return totalBudget > 0 ? Math.round(d.spend / totalBudget * 100) : 0;
+        })() + '%</div><div class="lab">预算使用率</div></div>' +
+        '</div></div>' +
       '<div class="card" style="margin-top:16px;display:flex;gap:14px;align-items:center;flex-wrap:wrap">' +
         icon('i-shield', 'ic-lg') +
         '<div style="flex:1;min-width:220px"><b style="font-size:14px">托管资金</b>' +
@@ -1045,6 +1087,13 @@
   function viewKyc() {
     var me = C.me || {};
     var kyc = me.kyc, biz = me.biz;
+    var accounts = C.accounts || [];
+    var accRows = accounts.map(function (a) {
+      return '<div class="interact-row"><div class="interact-main">' +
+        '<h4>' + platBadge(a.platform, true) + ' ' + esc(a.handle) + '</h4>' +
+        '<p>粉丝 ' + (a.followers >= 10000 ? (a.followers / 10000).toFixed(1) + 'w' : a.followers) + ' · 报关于 ' + new Date(a.addedAt).toLocaleDateString('zh-CN') + '</p></div>' +
+        '<button class="btn btn-danger btn-sm" data-action="account-remove" data-platform="' + a.platform + '" data-handle="' + esc(a.handle) + '">移除</button></div>';
+    }).join('');
     var kycCard = kyc && kyc.status === 'verified'
       ? '<div class="card"><div class="card-title">' + icon('i-shield') + '实名认证 · 已通过</div>' +
         '<p style="font-size:13.5px;color:var(--text2)">姓名：' + esc(kyc.realName) + '（证号尾号 ' + esc(String(me.idTail || kyc.realName ? '****' : '')) + '）</p>' +
@@ -1063,8 +1112,18 @@
         '<div class="field"><label>企业 / 品牌名称</label><input class="input" id="bizName" placeholder="与执照一致" maxlength="40"></div>' +
         '<div class="field"><label>营业执照号 / 统一社会信用代码</label><input class="input" id="bizNo" placeholder="15-18 位" maxlength="20"></div>' +
         '<button class="btn btn-primary btn-block" data-action="biz-submit">提交认证</button></div>';
-    return '<div class="page-head"><h1>' + icon('i-shield') + '认证中心</h1><div class="sub">实名与资质是平台资金与广告合规的基础</div></div>' +
+    return '<div class="page-head"><h1>' + icon('i-shield') + '认证中心</h1><div class="sub">实名、资质与账号报备是接单与出金的基础</div></div>' +
       '<div class="grid grid-2">' + kycCard + bizCard + '</div>' +
+      '<div class="card" style="margin-top:16px"><div class="card-title">' + icon('i-users') + '社交账号报备</div>' +
+        '<p style="font-size:13px;color:var(--muted);margin-bottom:12px">报备各平台账号与粉丝数后，才能接取有粉丝门槛的任务（最多 6 个）。数据由你如实填报，接单后商家可核验。</p>' +
+        (accRows || '<p style="font-size:13px;color:var(--muted);margin-bottom:10px">还没有报备任何账号 —— 未报备账号无法接取带粉丝门槛的任务。</p>') +
+        '<div class="field-row" style="margin-top:10px">' +
+        '<div class="field"><label>平台</label><select class="select" id="accPlatform" style="width:100%">' +
+        Object.keys(GT.PLATFORMS).map(function (p) { return '<option value="' + p + '">' + esc(GT.PLATFORMS[p].name) + '</option>'; }).join('') + '</select></div>' +
+        '<div class="field"><label>粉丝数</label><input class="input" id="accFollowers" type="number" min="0" placeholder="例如 5200"></div></div>' +
+        '<div class="field"><label>账号昵称或主页链接</label><input class="input" id="accHandle" placeholder="例如 @小葵的日常 或主页 URL" maxlength="60"></div>' +
+        '<button class="btn btn-primary" data-action="account-add">' + icon('i-plus') + '报备账号</button>' +
+      '</div>' +
       '<p style="margin-top:16px;font-size:12.5px;color:var(--muted)">' + icon('i-shield', 'ic-sm') +
       ' 平台承诺：认证资料仅用于合规校验与出金风控，不用于任何对外展示（详见隐私政策）。</p>';
   }
@@ -1171,6 +1230,9 @@
         '<td><span class="plat-row">' + plats.map(function (p) { return platBadge(p, true); }).join('') + '</span></td>' +
         '<td>' + modeBadge(c.mode) + '</td>' +
         '<td><div style="display:flex;align-items:center;gap:8px;min-width:130px"><div class="progress" style="flex:1"><i style="width:' + pct + '%"></i></div><span class="quota-text">' + c.taken + '/' + c.capacity + '</span></div></td>' +
+        '<td>' + (c.pendingReview > 0
+          ? '<span class="badge b-red">待验收 ' + c.pendingReview + '</span>'
+          : '<span class="badge b-gray">无待验收</span>') + '</td>' +
         '<td class="num">¥' + money(c.budget || 0) + '</td>' +
         '<td class="num">¥' + money(c.spend || 0) + '</td>' +
         '<td>' + (c.status === 'on'
@@ -1181,7 +1243,7 @@
     }).join('');
     return '<div class="page-head"><h1>' + icon('i-megaphone') + '任务管理</h1><div class="sub">共 ' + C.campaigns.length + ' 个任务 · 预算已托管，验收后自动划付（扣 10% 服务费）</div></div>' +
       '<div class="card" style="padding:0"><div class="table-wrap" style="border:none"><table class="data">' +
-      '<thead><tr><th>任务名称</th><th>平台</th><th>模式</th><th>接单进度</th><th>托管预算</th><th>已消耗</th><th>状态</th><th>操作</th></tr></thead>' +
+      '<thead><tr><th>任务名称</th><th>平台</th><th>模式</th><th>接单进度</th><th>待验收</th><th>托管预算</th><th>已消耗</th><th>状态</th><th>操作</th></tr></thead>' +
       '<tbody>' + rows + '</tbody></table></div></div>';
   }
 
@@ -1271,7 +1333,8 @@
       '<div class="stat-card" style="padding:10px"><div class="num" style="font-size:17px">' + C.contents.length + '</div><div class="lab">内容</div></div></div>' +
       '<div class="modal-actions" style="justify-content:space-between;flex-wrap:wrap;gap:8px">' +
       '<button class="btn btn-danger btn-sm" data-action="logout">退出登录</button>' +
-      '<div style="display:flex;gap:8px">' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+      '<button class="btn btn-ghost btn-sm" data-action="close-layers-nav" data-route="profile-self">我的主页</button>' +
       '<button class="btn btn-ghost btn-sm" data-action="close-layers-nav" data-route="kyc">认证中心</button>' +
       '<button class="btn btn-ghost btn-sm" data-action="pwd-open">修改密码</button>' +
       '<button class="btn btn-ghost btn-sm" data-action="close-layers">关闭</button></div></div>');
@@ -1703,9 +1766,36 @@
       case 'close-layers-nav': {
         var navRoute = el.getAttribute('data-route');
         closeLayers();
-        if (navRoute) location.hash = '#/' + navRoute;
+        if (navRoute === 'profile-self' && C.me) {
+          location.hash = '#/creator/' + C.me.id;
+        } else if (navRoute) {
+          location.hash = '#/' + navRoute;
+        }
         break;
       }
+      case 'guide-dismiss':
+        localStorage.setItem('gt_guide_done', '1');
+        render();
+        break;
+      case 'account-add': {
+        var ap = ($('#accPlatform') || {}).value || 'xhs';
+        var ah = (($('#accHandle') || {}).value || '').trim();
+        var af = Number(($('#accFollowers') || {}).value || 0);
+        Api.addAccount(ap, ah, af).then(async function (r) {
+          C.accounts = r.accounts;
+          toast('账号报备成功，现在可以接取对应粉丝门槛的任务了');
+          await refreshCurrent().catch(function () {});
+          render();
+        }).catch(handleErr);
+        break;
+      }
+      case 'account-remove':
+        Api.removeAccount(el.getAttribute('data-platform'), el.getAttribute('data-handle')).then(async function (r) {
+          C.accounts = r.accounts;
+          await refreshCurrent().catch(function () {});
+          render();
+        }).catch(handleErr);
+        break;
       case 'msg-read':
         Api.readMessage(el.getAttribute('data-id')).then(function () {
           var m = C.messages.filter(function (x) { return x.id === el.getAttribute('data-id'); })[0];

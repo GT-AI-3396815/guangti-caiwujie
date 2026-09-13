@@ -69,7 +69,7 @@ var suffix = Date.now().toString(36).slice(-4);
   console.log('— 敏感词与托管投放 —');
   var dirty = await req('POST', '/api/tasks', { title: ' cheapest 代刷 推广', mode: 'fixed', reward: 10, capacity: 2, days: 1 }, mt);
   ok(dirty.status === 400 && dirty.data.code === 'sensitive', '任务标题敏感词被拦截', dirty.data && dirty.data.error);
-  var created = await req('POST', '/api/tasks', { title: '自动验收·固定价任务', mode: 'fixed', reward: 120, capacity: 30, days: 7, fanMin: 100, desc: 'x', reqs: 'a', platforms: ['xhs'], reviewMode: 'auto' }, mt);
+  var created = await req('POST', '/api/tasks', { title: '自动验收·固定价任务', mode: 'fixed', reward: 120, capacity: 30, days: 7, fanMin: 0, desc: 'x', reqs: 'a', platforms: ['xhs'], reviewMode: 'auto' }, mt);
   ok(created.status === 200, '商家创建自动验收任务');
   var createdManual = await req('POST', '/api/tasks', { title: '人工验收·种草任务', mode: 'fixed', reward: 100, capacity: 5, days: 7, desc: 'y', reqs: 'b', platforms: ['dy'], reviewMode: 'manual' }, mt);
   ok(createdManual.status === 200, '商家创建人工验收任务');
@@ -186,6 +186,29 @@ var suffix = Date.now().toString(36).slice(-4);
   var newLogin = await req('POST', '/api/auth/login', { uname: invitee.user.uname, password: 'newpass666' });
   ok(newLogin.status === 200, '新密码可登录');
   bt = newLogin.data.token;
+
+  console.log('— 账号报备与粉丝门控 —');
+  var fanTask = await req('POST', '/api/tasks', { title: '高门槛·万粉任务', mode: 'fixed', reward: 60, capacity: 5, days: 7, fanMin: 5000, desc: 'f', reqs: 'r', platforms: ['xhs'], reviewMode: 'auto' }, mt);
+  ok(fanTask.status === 200, '商家创建粉丝门槛任务');
+  var accNoAcc = await req('POST', '/api/orders', { taskId: fanTask.data.task.id }, bt);
+  ok(accNoAcc.status === 400 && accNoAcc.data.code === 'need_account', '未报备账号接单被拦截', accNoAcc.data && accNoAcc.data.error);
+  var accAdd = await req('POST', '/api/accounts', { platform: 'xhs', handle: '@接单小王', followers: 6000 }, bt);
+  ok(accAdd.status === 200 && accAdd.data.accounts.length === 1, '报备账号成功');
+  var accList = (await req('GET', '/api/accounts/mine', null, bt)).data.accounts;
+  ok(accList[0].followers === 6000, '报备列表可查', accList);
+  var accOk = await req('POST', '/api/orders', { taskId: fanTask.data.task.id }, bt);
+  ok(accOk.status === 200, '报备后粉丝门槛通过');
+  var accRm = await req('POST', '/api/accounts/remove', { platform: 'xhs', handle: '@接单小王' }, bt);
+  ok(accRm.status === 200 && accRm.data.accounts.length === 0, '账号可移除');
+
+  console.log('— 互动目标链接 —');
+  var itDef = (await req('GET', '/api/interact', null, bt)).data.defs[0];
+  ok(typeof itDef.target === 'string' && itDef.target.indexOf('http') === 0, '互动任务携带目标链接', itDef.target);
+
+  console.log('— 商家待验收计数 —');
+  var cmps = (await req('GET', '/api/campaigns/mine', null, mt)).data.campaigns;
+  var hasPendingField = cmps.every(function (c) { return typeof c.pendingReview === 'number'; });
+  ok(cmps.length >= 2 && hasPendingField, '任务列表含待验收计数字段');
 
   console.log('— 榜单与安全 —');
   var rank = (await req('GET', '/api/rank')).data;
