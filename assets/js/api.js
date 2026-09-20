@@ -95,6 +95,9 @@
     // 举报
     report: function (targetType, targetId, reason) { return request('POST', '/api/reports', { targetType: targetType, targetId: targetId, reason: reason }); },
 
+    // 邀请关系
+    invitesMine: function () { return request('GET', '/api/invites/mine'); },
+
     // 达人主页
     userProfile: function (id) { return request('GET', '/api/users/' + id + '/profile'); },
 

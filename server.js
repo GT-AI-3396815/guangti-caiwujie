@@ -397,6 +397,10 @@
     }
     saveDB();
     pushMsg(u.id, 'order_settled', '任务已验收结算 ¥' + income, '「' + t.title + '」商家已验收' + (via === 'timeout' ? '（超时自动通过）' : '') + '，实收 ¥' + income + '（平台服务费 ¥' + fee + '）已划入余额。');
+    if (via === 'timeout' && t.merchantId !== 'official') {
+      pushMsg(t.merchantId, 'order_auto_approved', '验收已超时自动通过', '「' + t.title + '」超出 72 小时未处理，系统已自动验收并划付 ¥' + paid + '。');
+      sendTo(t.merchantId, { type: 'order_auto_approved', title: t.title, paid: paid });
+    }
     sendTo(u.id, { type: 'order_settled', paid: income, title: t.title, orderId: order.id });
     sendTo(t.merchantId, { type: 'campaign_spend', title: t.title, paid: paid });
     broadcast({ type: 'refresh' });
@@ -413,6 +417,7 @@
       u.rejectCount = (u.rejectCount || 0) + 1;
       u.credit = Math.max(0, (u.credit === undefined ? 80 : u.credit) - 5);
       pushMsg(u.id, 'order_rejected', '作品被退回修改', '「' + (t ? t.title : '') + '」商家给出了拒稿理由，请修改后重新提交。理由：' + order.rejectReason);
+      sendTo(u.id, { type: 'order_rejected', title: t ? t.title : '', reason: order.rejectReason });
     }
     saveDB();
     broadcast({ type: 'refresh' });
@@ -461,6 +466,7 @@
             db.escrow = txr(db.escrow - remaining);
             credit(mu, remaining, 'unfreeze', '任务到期 · 未消耗托管预算退回「' + t.title.slice(0, 12) + '」');
             pushMsg(mu.id, 'budget_refund', '到期任务预算已退回', '「' + t.title + '」已结束，未消耗托管预算 ¥' + remaining.toFixed(2) + ' 退回余额。');
+            sendTo(mu.id, { type: 'budget_refund', title: t.title, amount: remaining });
           }
         }
       }
@@ -736,6 +742,7 @@
     var q = ctx.query;
     var list = db.tasks.filter(function (t) {
       if (t.banned) return false; // 运营下架的任务不进广场
+      if (t.closed) return false; // 已到期关闭的任务不再展示
       if (q.platform && q.platform !== 'all' && t.platform !== q.platform) return false;
       if (q.mode && q.mode !== 'all' && t.mode !== q.mode) return false;
       if (q.q) {
@@ -755,7 +762,12 @@
     if (ctx.user) db.orders.forEach(function (o) { if (o.userId === ctx.user.id) acceptedIds[o.taskId] = 1; });
     json(ctx.res, 200, {
       tasks: list.map(function (t) {
-        return Object.assign({}, t, { accepted: !!acceptedIds[t.id], merchantName: t.merchant });
+        var mo = db.users.filter(function (u) { return u.id === t.merchantId; })[0];
+        return Object.assign({}, t, {
+          accepted: !!acceptedIds[t.id],
+          merchantName: t.merchant,
+          merchantVerified: !!(mo && mo.biz && mo.biz.status === 'verified')
+        });
       })
     });
   });
@@ -878,6 +890,10 @@
     t.taken++;
     saveDB();
     pushMsg(u.id, 'order_accepted', '接单成功', '「' + t.title + '」请在 ' + t.daysLeft + ' 天内完成创作并回填作品链接，截止后未交将释放名额。');
+    if (t.merchantId !== 'official') {
+      pushMsg(t.merchantId, 'order_accepted', '新接单通知', u.display + ' 接受了「' + t.title + '」，等待其提交作品。');
+      sendTo(t.merchantId, { type: 'order_accepted', title: t.title, creator: u.display });
+    }
     broadcast({ type: 'refresh' });
     json(ctx.res, 200, { order: order });
   }, true);
@@ -886,7 +902,10 @@
     var u = ctx.user;
     var orders = db.orders.filter(function (o) { return o.userId === u.id; }).slice().reverse().map(function (o) {
       var t = db.tasks.filter(function (x) { return x.id === o.taskId; })[0] || {};
-      return Object.assign({}, o, { title: t.title, platform: t.platform, mode: t.mode, reward: t.reward, reviewMode: t.reviewMode || 'auto', merchantId: t.merchantId });
+      return Object.assign({}, o, {
+        title: t.title, platform: t.platform, mode: t.mode, reward: t.reward,
+        reviewMode: t.reviewMode || 'auto', merchantId: t.merchantId, deadlineAt: t.deadlineAt || 0
+      });
     });
     json(ctx.res, 200, { orders: orders });
   }, true);
@@ -1251,6 +1270,18 @@
     db.contents.splice(i, 1);
     saveDB();
     json(ctx.res, 200, { ok: true });
+  }, true);
+
+  // ---- 邀请关系 ----
+  route('GET', '/api/invites/mine', function (ctx) {
+    var u = ctx.user;
+    var invited = db.users.filter(function (x) { return x.invitedBy === u.id; }).map(function (x) {
+      return { id: x.id, name: x.display, joinedAt: x.createdAt, totalEarn: x.totalEarn || 0 };
+    });
+    var bonusTotal = txr(db.txs.filter(function (t) {
+      return t.userId === u.id && t.type === 'invite_bonus';
+    }).reduce(function (s, t) { return s + t.amount; }, 0));
+    json(ctx.res, 200, { invited: invited, bonusTotal: bonusTotal });
   }, true);
 
   // ---- 商家看板 ----

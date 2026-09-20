@@ -210,6 +210,14 @@ var suffix = Date.now().toString(36).slice(-4);
   var hasPendingField = cmps.every(function (c) { return typeof c.pendingReview === 'number'; });
   ok(cmps.length >= 2 && hasPendingField, '任务列表含待验收计数字段');
 
+  console.log('— 邀请关系与认证商家标识 —');
+  var invList = (await req('GET', '/api/invites/mine', null, at)).data;
+  ok(invList.invited.length >= 1 && invList.invited[0].name === invitee.user.name, '邀请人可查受邀列表', invList.invited);
+  ok(Number(invList.bonusTotal) >= 10.8, '累计返佣统计正确', invList.bonusTotal);
+  var tasksPub = (await req('GET', '/api/tasks')).data.tasks;
+  var mvTask = tasksPub.filter(function (t) { return t.id === created.data.task.id; })[0];
+  ok(mvTask && mvTask.merchantVerified === true, '认证商家标识下发', mvTask && mvTask.merchantVerified);
+
   console.log('— 榜单与安全 —');
   var rank = (await req('GET', '/api/rank')).data;
   ok(rank.list.every(function (x) { return !x.seed; }), '榜单无示例数据(纯真实用户)');

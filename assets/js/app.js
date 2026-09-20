@@ -322,6 +322,8 @@
           '<span>' + icon('i-clock') + '剩 ' + t.daysLeft + ' 天</span>' +
           '<span>' + icon('i-users') + (t.fanMin >= 1000 ? (t.fanMin / 1000) + 'k' : t.fanMin) + ' 粉可接</span>' +
           modeBadge(t.mode) +
+          (t.merchantVerified ? '<span class="badge b-green">' + icon('i-shield', 'ic-sm') + '认证商家</span>' : '') +
+          (t.status === 'off' && !t.closed ? '<span class="badge b-gray">已暂停</span>' : '') +
         '</div>' +
         '<div class="task-foot">' +
           '<div class="progress' + (full ? ' full' : '') + '"><i style="width:' + pct + '%"></i></div>' +
@@ -492,6 +494,15 @@
     cancelled: ['已取消', 'st-off']
   };
 
+  function timeLeftText(ts) {
+    if (!ts) return '';
+    var ms = ts - Date.now();
+    if (ms <= 0) return '已到时';
+    var h = Math.floor(ms / 3600000);
+    if (h >= 24) return '剩 ' + Math.floor(h / 24) + ' 天';
+    if (h >= 1) return '剩 ' + h + ' 小时';
+    return '剩 ' + Math.max(1, Math.floor(ms / 60000)) + ' 分钟';
+  }
   function viewMy() {
     if (!C.orders.length) {
       return '<div class="page-head"><h1>' + icon('i-check') + '我的任务</h1><div class="sub">接受的任务会出现在这里，跟进发布与验收进度。</div></div>' +
@@ -501,6 +512,9 @@
     var feeNote = '平台服务费 ' + Math.round(10) + '% 将在结算时收取';
     var rows = C.orders.map(function (o) {
       var st = ST_NAMES[o.status] || ST_NAMES.todo;
+      var timeInfo = '';
+      if (o.status === 'todo' && o.deadlineAt) timeInfo = timeLeftText(o.deadlineAt);
+      if (o.status === 'review' && o.reviewDeadlineAt) timeInfo = timeLeftText(o.reviewDeadlineAt);
       var act = '';
       if (o.status === 'todo') {
         act = '<button class="btn btn-primary btn-sm" data-action="submit-link" data-id="' + o.id + '">' + icon('i-link') + '提交作品链接</button>' +
@@ -522,7 +536,7 @@
         '<td>' + platBadge(o.platform, true) + ' ' + esc((GT.PLATFORMS[o.platform] || {}).name || '') + '</td>' +
         '<td>' + modeBadge(o.mode) + '</td>' +
         '<td class="num">¥' + money(amount) + '</td>' +
-        '<td><span class="dot-status ' + st[1] + '">' + st[0] + '</span></td>' +
+        '<td><span class="dot-status ' + st[1] + '">' + st[0] + '</span>' + (timeInfo ? '<span style="font-size:11.5px;color:var(--muted);margin-left:6px">' + timeInfo + '</span>' : '') + '</td>' +
         '<td style="color:var(--muted)">' + timeAgo(o.acceptedAt) + '</td>' +
         '<td>' + act + '</td></tr>';
     }).join('');
@@ -548,7 +562,8 @@
 
     var composer =
       '<div class="card">' +
-        '<div class="card-title">' + icon('i-send') + '多平台一键发布</div>' +
+        '<div class="card-title">' + icon('i-send') + '多平台一键发布' +
+          '<span class="badge b-gray" title="真实发布需接入各平台开放接口；当前版本在站内完成创作、存档与数据模拟">模拟发布</span></div>' +
         '<div class="composer-head">' + platToggles + '</div>' +
         '<div class="field"><label>标题</label><input class="input" id="pubTitle" maxlength="30" placeholder="一句话讲清亮点（30 字内）" value="' + esc(pendingTitle) + '"></div>' +
         '<div class="field"><label>正文</label><textarea id="pubText" placeholder="分享真实体验、使用感受，配上具体场景更容易获得推荐流量…">' + esc(pendingText) + '</textarea>' +
@@ -618,25 +633,32 @@
 
   function viewInteract() {
     var doneTotal = Object.keys(C.interact.done).reduce(function (s, k) { return s + C.interact.done[k]; }, 0);
+    S.interactArmed = S.interactArmed || {};
     var rows = C.interact.defs.map(function (d) {
       var left = interactLeft(d);
       var cd = cdLeft(d);
+      var armedAt = S.interactArmed[d.id] || 0;
+      var armed = armedAt > 0 && Date.now() >= armedAt;
+      var counting = armedAt > Date.now();
       var btn;
       if (left <= 0) btn = '<button class="btn btn-ghost btn-sm" disabled>今日已满</button>';
       else if (cd > 0) btn = '<button class="btn btn-ghost btn-sm" data-cd="' + d.id + '" disabled>' + cd + 's</button>';
+      else if (d.target && !armed) btn = '<button class="btn btn-soft btn-sm" disabled>' + (counting ? '停留核验中…' : '先打开目标内容') + '</button>';
       else btn = '<button class="btn btn-primary btn-sm" data-action="interact-do" data-id="' + d.id + '">去完成</button>';
       return '<div class="interact-row">' +
         '<span class="interact-ico">' + icon(d.icon, 'ic-lg') + '</span>' +
         '<div class="interact-main"><h4>' + esc(d.title) + '</h4>' +
         '<p>' + esc(d.desc) + ' · 今日剩余 ' + left + ' 次</p>' +
-        (d.target ? '<p><a href="' + esc(d.target) + '" target="_blank" rel="noopener" style="color:var(--cyan)">' + icon('i-link', 'ic-sm') + ' 打开目标内容 ↗</a></p>' : '') +
+        (d.target ? '<p><a href="' + esc(d.target) + '" target="_blank" rel="noopener" data-action="interact-arm" data-id="' + d.id + '" style="color:var(--cyan)">' + icon('i-link', 'ic-sm') + ' 打开目标内容 ↗</a>' +
+          (counting ? ' <span class="arm-count" data-arm="' + d.id + '" style="color:var(--gold)">停留核验中 ' + Math.ceil((armedAt - Date.now()) / 1000) + 's…</span>' :
+           (armed ? ' <span style="color:var(--green)">✓ 停留已达 15 秒，可结算</span>' : ' <span style="color:var(--muted)">(需停留 15 秒)</span>')) + '</p>' : '') +
         '</div>' +
         '<span class="interact-reward">¥' + money(d.reward) + '<small>/次</small></span>' + btn + '</div>';
     }).join('');
     return '<div class="page-head"><h1>' + icon('i-heart') + '互动大厅</h1><div class="sub">轻量互动任务，随做随结 · 今日已完成 ' + doneTotal + ' 次</div></div>' +
       '<div style="display:flex;flex-direction:column;gap:10px">' + rows + '</div>' +
       '<p style="margin-top:16px;font-size:12.5px;color:var(--muted)">' + icon('i-shield', 'ic-sm') +
-      ' 平台风控提示：互动任务需真实操作，检测到机器刷量将扣除当日全部互动收益。</p>';
+      ' 平台风控提示：互动任务需打开目标内容并停留 15 秒后才可结算，检测到机器刷量将扣除当日全部互动收益。</p>';
   }
   function startInteractTimer() {
     if (S.interactTimer) clearInterval(S.interactTimer);
@@ -650,11 +672,23 @@
           if (C.interact.cooldown[k] <= 0) need = true;
         }
       });
-      if (need) { await refreshCurrent().catch(function () {}); render(); return; }
+      // 停留核验倒计时：到期瞬间触发一次重绘，切换为可结算
+      var armChanged = false;
+      Object.keys(S.interactArmed || {}).forEach(function (k) {
+        var t = S.interactArmed[k];
+        if (t > 0 && t <= Date.now()) { S.interactArmed[k] = Date.now(); armChanged = true; }
+        else if (t > Date.now() && t - Date.now() <= 1100) armChanged = true;
+      });
+      if (need || armChanged) { await refreshCurrent().catch(function () {}); render(); return; }
       $all('[data-cd]').forEach(function (b) {
         var id = b.getAttribute('data-cd');
         var left = C.interact.cooldown[id] || 0;
         if (left > 0) b.textContent = left + 's';
+      });
+      $all('.arm-count').forEach(function (el) {
+        var id = el.getAttribute('data-arm');
+        var t = (S.interactArmed || {})[id] || 0;
+        if (t > Date.now()) el.textContent = '停留核验中 ' + Math.ceil((t - Date.now()) / 1000) + 's…';
       });
     }, 1000);
   }
@@ -1310,14 +1344,30 @@
   function modalInvite() {
     var code = C.me ? C.me.inviteCode : 'GT-WUJIE';
     openModal(
-      '<h3>邀请好友 · 收益返佣</h3><div class="modal-sub">好友注册时填写你的邀请码完成绑定</div>' +
+      '<h3>邀请好友 · 收益返佣</h3><div class="modal-sub" id="invSub">好友注册时填写你的邀请码完成绑定</div>' +
       '<div style="display:flex;gap:10px;align-items:center;padding:16px;border-radius:14px;background:var(--brand-grad-soft);border:1px dashed rgba(246,196,83,.45)">' +
       '<div style="flex:1"><div style="font-size:12px;color:var(--muted)">你的专属邀请码</div>' +
       '<div style="font-size:22px;font-weight:800;letter-spacing:2px" class="grad-text">' + esc(code) + '</div></div>' +
       '<button class="btn btn-primary btn-sm" data-action="copy" data-text="' + esc(code) + '">' + icon('i-copy') + '复制</button></div>' +
-      '<p style="font-size:12.5px;color:var(--muted);margin-top:14px">· 好友每获得一笔任务结算，你实时到账其 10% 返佣（平台补贴，不扣好友收益）<br>' +
-      '· 绑定关系永久有效，返佣直接进入余额，可提现</p>' +
+      '<div id="invList" style="margin-top:14px"><p style="font-size:13px;color:var(--muted)">' + icon('i-robot', 'ic-sm') + ' 正在读取邀请记录…</p></div>' +
+      '<p style="font-size:12.5px;color:var(--muted);margin-top:14px">· 好友每获得一笔任务结算，你实时到账其 10% 返佣（平台补贴，不扣好友收益）<br>· 绑定关系永久有效，返佣直接进入余额，可提现</p>' +
       '<div class="modal-actions"><button class="btn btn-ghost btn-block" data-action="close-layers">我知道了</button></div>');
+    if (C.me) {
+      Api.invitesMine().then(function (r) {
+        var box = $('#invList');
+        if (!box) return;
+        var invited = r.invited || [];
+        var html = '<div style="font-size:13px;color:var(--text2)">已邀请 <b>' + invited.length + '</b> 人 · 累计返佣 <b class="grad-text">¥' + money(r.bonusTotal) + '</b></div>';
+        if (invited.length) {
+          html += '<div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">';
+          invited.slice(0, 5).forEach(function (x) {
+            html += '<div style="display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted)"><span>' + esc(x.name) + '</span><span>累计收益 ¥' + money(x.totalEarn) + '</span></div>';
+          });
+          html += '</div>';
+        }
+        box.innerHTML = html;
+      }).catch(function () {});
+    }
   }
   function modalUser() {
     if (!C.me) return;
@@ -1682,6 +1732,15 @@
       }
       case 'checkin': requireAuth(doCheckin); break;
       case 'interact-do': requireAuth(function () { doInteract(el.getAttribute('data-id')); }); break;
+      case 'interact-arm': {
+        var armId = el.getAttribute('data-id');
+        S.interactArmed = S.interactArmed || {};
+        if (!S.interactArmed[armId]) {
+          S.interactArmed[armId] = Date.now() + 15000;
+          render(); // 立即显示停留核验倒计时
+        }
+        break;
+      }
       case 'pub-tab': S.pubTab = el.getAttribute('data-tab'); render(); break;
       case 'plat-toggle': {
         var p = el.getAttribute('data-plat');
@@ -1796,13 +1855,27 @@
           render();
         }).catch(handleErr);
         break;
-      case 'msg-read':
-        Api.readMessage(el.getAttribute('data-id')).then(function () {
-          var m = C.messages.filter(function (x) { return x.id === el.getAttribute('data-id'); })[0];
-          if (m && !m.read) { m.read = true; C.unread = Math.max(0, C.unread - 1); renderUser(); }
-          render();
+      case 'msg-read': {
+        var mid = el.getAttribute('data-id');
+        var msg = C.messages.filter(function (x) { return x.id === mid; })[0];
+        Api.readMessage(mid).then(function () {
+          if (msg && !msg.read) { msg.read = true; C.unread = Math.max(0, C.unread - 1); renderUser(); }
+          // 按消息类型深链跳转
+          var t = msg ? msg.type : '';
+          var creatorTarget = { order_settled: 1, order_rejected: 1, order_cancelled: 1 };
+          var merchantTarget = { order_review: 1, order_auto_approved: 1, budget_refund: 1, task_paused: 1 };
+          if ((C.me.role === 'creator' && creatorTarget[t]) || (C.me.role === 'merchant' && merchantTarget[t])) {
+            location.hash = C.me.role === 'creator' ? '#/my' : '#/campaigns';
+          } else if (t === 'content_published') {
+            location.hash = '#/publish';
+          } else if (t === 'kyc_ok' || t === 'biz_ok') {
+            location.hash = '#/kyc';
+          } else {
+            render();
+          }
         }).catch(handleErr);
         break;
+      }
       case 'msg-read-all':
         Api.readAllMessages().then(async function () {
           C.unread = 0;
@@ -2054,6 +2127,18 @@
     }
     if (m.type === 'content_published' && m.userId === C.me.id) {
       toast('定时内容「' + String(m.title || '').slice(0, 14) + '…」已自动上线 🚀');
+    }
+    if (m.type === 'order_rejected' && m.userId === C.me.id) {
+      toast('「' + String(m.title || '').slice(0, 14) + '…」作品被退回：' + String(m.reason || '').slice(0, 30), 'err');
+    }
+    if (m.type === 'order_accepted' && m.userId === C.me.id) {
+      toast((m.creator || '达人') + ' 接受了「' + String(m.title || '').slice(0, 12) + '…」，等待其提交作品');
+    }
+    if (m.type === 'order_auto_approved' && m.userId === C.me.id) {
+      toast('「' + String(m.title || '').slice(0, 12) + '…」验收超时，已自动通过并划付 ¥' + money(m.paid), 'warn');
+    }
+    if (m.type === 'budget_refund' && m.userId === C.me.id) {
+      toast('「' + String(m.title || '').slice(0, 12) + '…」到期，未消耗预算 ¥' + money(m.amount) + ' 已退回余额');
     }
   }
   function startLive() {
