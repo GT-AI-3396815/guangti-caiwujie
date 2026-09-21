@@ -1,11 +1,12 @@
 /* ============================================================
    光体•财无界 — API 集成测试（node tests/api-test.mjs）
    覆盖：认证/邀请/充值/托管/验收状态机/服务费/KYC/消息/举报/
-         敏感词/限流/改密码/达人主页/内容删除/提现审批
+         敏感词/账号报备/改密码/达人主页/内容删除/SSE 定向推送
+   限流测试独立于 tests/ratelimit-test.mjs（避免污染认证配额）
    ============================================================ */
+import { readFileSync } from 'node:fs';
 var BASE = process.env.TEST_BASE || 'http://localhost:8642';
 // 运营密钥与服务端同源：环境变量优先，其次本机 config.local.json
-import { readFileSync } from 'node:fs';
 var ADMIN_KEY = process.env.ADMIN_KEY || '';
 if (!ADMIN_KEY) {
   try {
@@ -75,8 +76,6 @@ var suffix = Date.now().toString(36).slice(-4);
   ok(createdManual.status === 200, '商家创建人工验收任务');
   var wm = (await req('GET', '/api/wallet', null, mt)).data;
   ok(wm.balance === 11888 - 3600 - 500, '两任务托管冻结共4100', wm.balance);
-  var score = created.data.task.aiScore;
-  ok(score >= 60 && score <= 99 && created.data.task.aiScore === createdManual.data.task.aiScore - 0 || true, '匹配分为规则模型产物', score);
 
   console.log('— 接单与自动验收（含服务费）—');
   var acc = await req('POST', '/api/orders', { taskId: created.data.task.id }, bt);
@@ -218,6 +217,46 @@ var suffix = Date.now().toString(36).slice(-4);
   var mvTask = tasksPub.filter(function (t) { return t.id === created.data.task.id; })[0];
   ok(mvTask && mvTask.merchantVerified === true, '认证商家标识下发', mvTask && mvTask.merchantVerified);
 
+  console.log('— SSE 个人事件推送（带令牌） —');
+  var sseTask = await req('POST', '/api/tasks', { title: 'SSE 验证·人工验收', mode: 'fixed', reward: 30, capacity: 3, days: 5, desc: 's', reqs: 'r', platforms: ['xhs'], reviewMode: 'manual' }, mt);
+  ok(sseTask.status === 200, '创建 SSE 验证任务');
+  var accS = await req('POST', '/api/orders', { taskId: sseTask.data.task.id }, bt);
+  ok(accS.status === 200, '达人接 SSE 验证任务');
+  await req('POST', '/api/orders/' + accS.data.order.id + '/submit', { link: 'https://xhs.demo/sse-001' }, bt);
+  var ctrl2 = new AbortController();
+  var streamRes2 = await fetch(BASE + '/api/stream?token=' + encodeURIComponent(bt), { signal: ctrl2.signal });
+  ok(streamRes2.status === 200, '带令牌 SSE 通道建立');
+  var reader2 = streamRes2.body.getReader();
+  var dec2 = new TextDecoder();
+  var personalFrame = '';
+  var readLoop2 = (async function () {
+    try {
+      for (;;) {
+        var chunk = await reader2.read();
+        if (chunk.done) break;
+        personalFrame += dec2.decode(chunk.value);
+        if (personalFrame.indexOf('"order_rejected"') >= 0) break;
+      }
+    } catch (e) { /* 中止 */ }
+  })();
+  await sleep(300);
+  var rj2 = await req('POST', '/api/orders/' + accS.data.order.id + '/reject', { reason: '测试拒稿·数据不足请补充' }, mt);
+  ok(rj2.status === 200, '人工拒稿触发（用于验证个人推送）');
+  var t1 = Date.now();
+  while (Date.now() - t1 < 4000 && personalFrame.indexOf('"order_rejected"') < 0) await sleep(100);
+  ctrl2.abort();
+  await readLoop2;
+  ok(personalFrame.indexOf('"order_rejected"') >= 0, '个人事件按身份定向推送(拒稿)', personalFrame.slice(0, 100));
+
+  console.log('— CPE 托管封顶（击穿防护） —');
+  var cpeTask = await req('POST', '/api/tasks', { title: 'CPE 封顶验证', mode: 'cpe', reward: 10, capacity: 2, days: 3, fanMin: 0, desc: 'c', reqs: 'c', platforms: ['dy'], reviewMode: 'auto' }, mt);
+  ok(cpeTask.status === 200, '创建 CPE 自动验收任务');
+  var accC = await req('POST', '/api/orders', { taskId: cpeTask.data.task.id }, bt);
+  await req('POST', '/api/orders/' + accC.data.order.id + '/submit', { link: 'https://dy.demo/cpe-001' }, bt);
+  await sleep(5800);
+  var cpeDetail = (await req('GET', '/api/tasks/' + cpeTask.data.task.id)).data.task;
+  ok(cpeDetail.spend <= cpeDetail.budget, 'CPE 结算被托管预算封顶', [cpeDetail.spend, cpeDetail.budget]);
+
   console.log('— 榜单与安全 —');
   var rank = (await req('GET', '/api/rank')).data;
   ok(rank.list.every(function (x) { return !x.seed; }), '榜单无示例数据(纯真实用户)');
@@ -226,7 +265,7 @@ var suffix = Date.now().toString(36).slice(-4);
   var xss = await req('POST', '/api/auth/register', { uname: '<img src=x>', password: 'demo666', role: 'creator' });
   ok(xss.status === 400, '非法用户名被拒(防注入)');
 
-  console.log('— SSE 实时推送 —');
+  console.log('— SSE 实时广播 —');
   var ctrl = new AbortController();
   var streamRes = await fetch(BASE + '/api/stream', { signal: ctrl.signal });
   ok(streamRes.status === 200 && (streamRes.headers.get('content-type') || '').indexOf('text/event-stream') >= 0, 'SSE 通道建立(text/event-stream)');
@@ -250,14 +289,6 @@ var suffix = Date.now().toString(36).slice(-4);
   ctrl.abort();
   await readLoop;
   ok(gotFrame.indexOf('"refresh"') >= 0, '变更事件实时推送到订阅端', gotFrame.slice(0, 80));
-
-  console.log('— 限流（放最后，防污染）—');
-  var burst429 = 0;
-  for (var i = 0; i < 45; i++) {
-    var rr = await req('POST', '/api/auth/login', { uname: 'rl_' + i, password: 'wrongpwd' });
-    if (rr.status === 429) burst429++;
-  }
-  ok(burst429 > 0, '认证接口触发限流(429)', burst429 + ' 次');
 
   console.log('\n结果: ' + passed + ' 通过, ' + failed + ' 失败');
   process.exit(failed ? 1 : 0);

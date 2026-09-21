@@ -430,6 +430,18 @@
     S.drawerTaskId = id;
     var full = t.taken >= t.capacity;
     var pct = Math.min(100, Math.round(t.taken / t.capacity * 100));
+    // 粉丝自检：接单前明确告知能否接取，避免白跑
+    var myBest = 0;
+    (C.accounts || []).forEach(function (a) { if (a.followers > myBest) myBest = a.followers; });
+    var fanOk = t.fanMin <= 0 || myBest >= t.fanMin;
+    var fanLine = t.fanMin > 0
+      ? '<div style="margin-top:10px;font-size:12.5px;color:' + (fanOk ? 'var(--green)' : 'var(--red)') + '">' +
+        icon(fanOk ? 'i-check' : 'i-close', 'ic-sm') +
+        (fanOk
+          ? ' 你的报备账号最高粉丝 ' + myBest + '，满足门槛（≥ ' + t.fanMin + '）'
+          : ' 该任务要求粉丝 ≥ ' + t.fanMin + '，你当前最高 ' + myBest + '，需先报备更高粉丝账号') +
+        '</div>'
+      : '';
     openDrawer(
       '<div class="drawer-head"><div style="display:flex;gap:8px;flex-wrap:wrap">' +
         (t.pinned ? tagBadge('置顶') : '') + (t.tags || []).filter(function (x) { return x !== '置顶'; }).map(tagBadge).join('') + modeBadge(t.mode) +
@@ -455,6 +467,7 @@
           '<div class="progress' + (full ? ' full' : '') + '" style="flex:1"><i style="width:' + pct + '%"></i></div>' +
           '<span class="quota-text">' + t.taken + '/' + t.capacity + ' 人</span></div>' +
       '</div>' +
+      fanLine +
 
       '<div class="detail-sec"><h4>任务说明</h4><p style="font-size:13.5px;color:var(--text2);line-height:1.8">' + esc(t.desc) + '</p></div>' +
       '<div class="detail-sec"><h4>结算与资金保障</h4><table class="reward-table">' + rewardRows(t) + '</table></div>' +
@@ -475,9 +488,11 @@
           ? '<button class="btn btn-ghost btn-block" disabled>本期已抢光，等待下期</button>'
           : t.accepted
             ? '<button class="btn btn-soft btn-block" data-action="go-my">' + icon('i-check') + '已接受 · 去发布</button>'
-            : '<button class="btn btn-primary btn-block btn-lg" data-action="accept" data-id="' + t.id + '">' + icon('i-bolt') + '立即接受任务</button>') +
+            : fanOk
+              ? '<button class="btn btn-primary btn-block btn-lg" data-action="accept" data-id="' + t.id + '">' + icon('i-bolt') + '立即接受任务</button>'
+              : '<button class="btn btn-ghost btn-block btn-lg" data-action="nav" data-route="kyc">' + icon('i-users') + '粉丝不足 · 去报备账号</button>') +
       '</div>' +
-      (t.oneKey && !full && !t.accepted
+      (t.oneKey && !full && !t.accepted && fanOk
         ? '<button class="btn btn-ghost btn-block" style="margin-top:10px" data-action="quick-publish" data-id="' + t.id + '">' + icon('i-send') + '一键发布（AI 代发）</button>'
         : '')
     );
@@ -609,10 +624,10 @@
         return '<span style="display:inline-flex;align-items:center;gap:4px;margin-right:10px">' + platBadge(p, true) +
           '<span class="badge ' + b + '">' + esc(st) + '</span></span>';
       }).join('');
-      var thumb = c.thumb
-        ? '<img src="' + c.thumb + '" alt="" style="width:34px;height:34px;border-radius:8px;object-fit:cover;vertical-align:middle;margin-right:8px;border:1px solid var(--line)">'
+      var thumb = (c.images && c.images[0])
+        ? '<img src="' + c.images[0] + '" alt="" style="width:34px;height:34px;border-radius:8px;object-fit:cover;vertical-align:middle;margin-right:8px;border:1px solid var(--line)">'
         : '';
-      return '<tr><td class="strong">' + thumb + esc(c.title) + '</td><td>' + plats + '</td>' +
+      return '<tr><td class="strong" style="cursor:pointer" data-action="content-open" data-id="' + c.id + '">' + thumb + esc(c.title) + '</td><td>' + plats + '</td>' +
         '<td class="num">' + c.stats.views + '</td><td>' + c.stats.likes + '</td><td>' + c.stats.comments + '</td>' +
         '<td style="color:var(--muted)">' + timeAgo(c.createdAt) + '</td>' +
         '<td><button class="btn btn-danger btn-sm" data-action="content-del" data-id="' + c.id + '">删除</button></td></tr>';
@@ -1091,6 +1106,38 @@
       ' 验收通过即从托管预算划付：结算额 × 90% 付达人，10% 为平台服务费。请客观验收，恶意拒稿将影响商家信用。</p>'
     );
   }
+  /* ---------------- 内容详情抽屉 ---------------- */
+  function openContentDrawer(id) {
+    var c = C.contents.filter(function (x) { return x.id === id; })[0];
+    if (!c) return;
+    var plats = Object.keys(c.platforms).map(function (p) {
+      var st = c.platforms[p];
+      var b = st === '已发布' ? 'b-green' : st === '审核中' ? 'b-blue' : st === '定时中' ? 'b-cyan' : 'b-red';
+      return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' + platBadge(p, true) +
+        '<span style="font-size:13px;color:var(--text2)">' + esc(GT.PLATFORMS[p].name) + '</span>' +
+        '<span class="badge ' + b + '">' + esc(st) + '</span></div>';
+    }).join('');
+    var imgs = (c.images || []).map(function (src) {
+      return '<img src="' + src + '" alt="" style="width:100%;border-radius:12px;border:1px solid var(--line);margin-bottom:8px">';
+    }).join('');
+    openDrawer(
+      '<div class="drawer-head"><h2 style="font-size:18px;font-weight:800;line-height:1.5">' + esc(c.title) + '</h2>' +
+      '<button class="drawer-close" data-action="close-layers">' + icon('i-close') + '</button></div>' +
+      '<div class="task-meta" style="margin:10px 0 16px">' +
+        '<span>' + icon('i-clock') + '发布于 ' + timeAgo(c.createdAt) + '</span>' +
+        '<span>' + icon('i-heart') + '点赞 ' + c.stats.likes + '</span>' +
+        '<span>' + icon('i-send') + '评论 ' + c.stats.comments + '</span>' +
+      '</div>' +
+      '<div class="detail-sec"><h4>平台状态</h4>' + plats + '</div>' +
+      '<div class="detail-sec"><h4>正文</h4><p style="font-size:13.5px;color:var(--text2);line-height:1.9">' + esc(c.text || '（无正文）') + '</p></div>' +
+      (imgs ? '<div class="detail-sec"><h4>配图</h4>' + imgs + '</div>' : '') +
+      '<div style="margin-top:24px;display:flex;gap:10px">' +
+        '<button class="btn btn-soft btn-block" data-action="nav" data-route="publish">再写一篇</button>' +
+        '<button class="btn btn-danger btn-block" data-action="content-del" data-id="' + c.id + '">删除</button>' +
+      '</div>'
+    );
+  }
+
   /* ================================================================
      新增视图：消息中心 / 认证中心 / 达人主页 / 协议 / 隐私 / 运营后台
      ================================================================ */
@@ -1704,10 +1751,12 @@
       case 'logout':
         Api.logout();
         C.me = null;
+        C.unread = 0;
         closeLayers();
         toast('已退出登录', 'warn');
         location.hash = '#/market';
         nav();
+        startLive(); // 以游客身份重连实时通道
         break;
       case 'user-menu': modalUser(); break;
       case 'close-layers': closeLayers(); break;
@@ -1977,6 +2026,7 @@
           }).catch(handleErr);
         });
         break;
+      case 'content-open': openContentDrawer(el.getAttribute('data-id')); break;
       case 'content-del':
         if (!confirm('确定删除这条内容？删除后不可恢复。')) return;
         Api.deleteContent(el.getAttribute('data-id')).then(async function () {
@@ -1991,6 +2041,7 @@
         var pn = ($('#pwdNew') || {}).value || '';
         Api.changePassword(po, pn).then(function (r) {
           Api.setToken(r.token);
+          startLive(); // 新令牌重连实时通道
           closeLayers();
           toast('密码已修改，其他设备已退出');
         }).catch(handleErr);
@@ -2043,6 +2094,7 @@
       Api.setToken(r.token);
       C.me = r.user;
       S.role = C.me.role === 'merchant' ? 'merchant' : 'creator';
+      startLive(); // 以登录身份重连，接收个人实时事件
       closeLayers();
       var next = S.authNext; S.authNext = null;
       if (next) next();
@@ -2142,8 +2194,10 @@
     }
   }
   function startLive() {
+    if (es) { try { es.close(); } catch (e) { /* 忽略 */ } es = null; }
     try {
-      es = new EventSource('/api/stream');
+      // EventSource 无法自定义请求头，登录态通过查询参数传递令牌
+      es = new EventSource('/api/stream' + (Api.getToken() ? '?token=' + encodeURIComponent(Api.getToken()) : ''));
     } catch (e) { setLive(false); return; }
     es.onopen = function () { setLive(true); };
     es.onerror = function () { setLive(false); };
@@ -2164,6 +2218,8 @@
         C.me = (await Api.me()).user;
         var msgData = await Api.messages();
         C.unread = msgData.unread;
+        var accData = await Api.accountsMine();
+        C.accounts = accData.accounts;
       } catch (e) { Api.setToken(''); }
     }
     if (C.me) S.role = C.me.role === 'merchant' ? 'merchant' : 'creator';

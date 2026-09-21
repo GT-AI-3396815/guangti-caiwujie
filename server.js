@@ -664,7 +664,11 @@
       'Connection': 'keep-alive'
     });
     ctx.res.write(':connected\n\n');
-    var client = { res: ctx.res, userId: ctx.user ? ctx.user.id : null };
+    // EventSource 无法携带 Authorization 头，允许通过查询参数传令牌
+    var qtok = String(ctx.query.token || '');
+    var su = qtok && db.sessions[qtok];
+    var sseUser = su ? db.users.filter(function (x) { return x.id === su.userId; })[0] : ctx.user;
+    var client = { res: ctx.res, userId: sseUser ? sseUser.id : null };
     sseClients.push(client);
     ctx.req.on('close', function () {
       var i = sseClients.indexOf(client);
@@ -1034,12 +1038,7 @@
   }, true);
   route('GET', '/api/contents/mine', function (ctx) {
     sweepReviewOrders();
-    var list = db.contents.filter(function (c) { return c.userId === ctx.user.id; }).slice().reverse().map(function (c) {
-      var pub = Object.assign({}, c);
-      pub.thumb = (c.images && c.images[0]) || '';
-      delete pub.images;
-      return pub;
-    });
+    var list = db.contents.filter(function (c) { return c.userId === ctx.user.id; }).slice().reverse();
     json(ctx.res, 200, { contents: list });
   }, true);
 
